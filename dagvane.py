@@ -64,6 +64,8 @@ DEFAULT_CONFIG = {
     "max_history_messages": 40,
     # Max rounds to auto-continue when a response stops at max_tokens. 1 = off.
     "max_continuations": 4,
+    "timeout": 600.0,
+    "max_retries": 2,
 }
 
 INT_KEYS = {"max_tokens", "max_history_messages", "top_k", "max_continuations"}
@@ -82,6 +84,7 @@ SETTING_DESCRIPTIONS = {
     "max_continuations": "Auto-continue rounds when hitting max_tokens (1 = off).",
 }
 
+# static list as fallback
 KNOWN_MODELS = [
     "claude-opus-4-20250514",
     "claude-sonnet-4-20250514",
@@ -413,6 +416,8 @@ def append_records(session: str, records: list) -> None:
 
 
 def update_meta(session: str, model: str, usage, stop_reason) -> None:
+    records = read_records(session)
+    role_recs = [r for r in records if r.get("role") in ("user", "assistant")]
     path = meta_file(session)
     old = {}
     if path.exists():
@@ -420,13 +425,11 @@ def update_meta(session: str, model: str, usage, stop_reason) -> None:
             old = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             old = {}
-    if not isinstance(old, dict):
-        old = {}
     meta = {
         "session": session,
         "created_at": old.get("created_at") or utc_now(),
         "updated_at": utc_now(),
-        "turns": int(old.get("turns", 0)) + 1,
+        "turns": len(role_recs) // 2,
         "last_model": model,
         "last_usage": usage,
         "last_stop_reason": stop_reason,
@@ -521,62 +524,49 @@ def detect_bad_param(message: str):
         m = pat.search(message or "")
         if m:
             name = m.group(1)
-            if name in SAMPLING_PARAMS or name in {"system", "top_p", "top_k", "temperature"}:
+            if name == "system":
+                return None  # never silently drop the system prompt
+            if name in SAMPLING_PARAMS or name in {"top_p", "top_k", "temperature"}:
                 return name
     return None
-
-
-def create_with_fallback(client, messages, params, extra_headers):
-    """Call the API, dropping individual params the model rejects, then retry."""
-    current = dict(params)
-    dropped = []
-    while True:
-        kwargs = {"messages": messages, **current}
-        if extra_headers:
-            kwargs["extra_headers"] = extra_headers
-        try:
-            return client.messages.create(**kwargs), current, dropped
-        except APIError as e:
-            bad = detect_bad_param(str(e))
-            if bad and bad in current:
-                current.pop(bad, None)
-                dropped.append(bad)
-                continue
-            sys.exit(f"Anthropic API error: {e}")
-        except Exception as e:
-            sys.exit(f"Request failed: {e}")
 
 
 def create_full_answer(client, base_messages, params, extra_headers, max_rounds):
     """Concatenate multiple responses when the model stops at max_tokens."""
     parts = []
+    dropped = []
     messages = list(base_messages)
     final_response = None
     used_params = dict(params)
     all_dropped: list[str] = []
+    cfg = load_config()
 
-    for round_idx in range(max(1, max_rounds)):
-        response, used_params, dropped = create_with_fallback(
-            client, messages, used_params, extra_headers
-        )
-        for d in dropped:
-            if d not in all_dropped:
-                all_dropped.append(d)
-        final_response = response
-        chunk = extract_text(response)
-        if not chunk:
-            chunk = safe_json_dumps(to_plain(response), ensure_ascii=False, indent=2)
-        parts.append(chunk)
+    for _ in range(max(1, max_rounds)):
+        with client.messages.stream(
+            model=cfg["model"],
+            max_tokens=cfg["max_tokens"],
+            messages=messages
+        ) as stream:
+            response = stream.get_final_message()
 
-        if getattr(response, "stop_reason", None) != "max_tokens":
-            break
+            for d in dropped:
+                if d not in all_dropped:
+                    all_dropped.append(d)
+            final_response = response
+            chunk = extract_text(response)
+            if not chunk:
+                chunk = safe_json_dumps(to_plain(response), ensure_ascii=False, indent=2)
+            parts.append(chunk)
 
-        messages = messages + [
-            {"role": "assistant", "content": chunk},
-            {"role": "user", "content":
-                "Continue the previous answer exactly where it stopped. "
-                "Do not repeat any already-emitted text. Do not add commentary."},
-        ]
+            if getattr(response, "stop_reason", None) != "max_tokens":
+                break
+
+            messages = messages + [
+                {"role": "assistant", "content": chunk},
+                {"role": "user", "content":
+                    "Continue the previous answer exactly where it stopped. "
+                    "Do not repeat any already-emitted text. Do not add commentary."},
+            ]
     else:
         print(
             "[dagvane] WARNING: stopped after max continuation rounds; "
@@ -622,7 +612,11 @@ def cmd_chat(args):
     chunks = []
     if args.message:
         chunks.append(args.message)
-    if args.stdin or (not args.message and not sys.stdin.isatty()):
+
+    want_stdin = args.stdin or (not args.message and not sys.stdin.isatty())
+    if want_stdin:
+        if sys.stdin.isatty() and args.stdin:
+            print("[dagvane] reading stdin until EOF (Ctrl-D)…", file=sys.stderr)
         chunks.append(sys.stdin.read())
     prompt_text = "\n".join(c.strip() for c in chunks if c and c.strip()).strip()
     prompt_text = sanitize_text(prompt_text)
@@ -651,7 +645,11 @@ def cmd_chat(args):
             if args.context_messages is not None
             else int(cfg.get("max_history_messages", 40))
         )
-        history = normalize_history(history_to_messages(read_records(session), int(ctx_limit)))
+        all_msgs = normalize_history(history_to_messages(read_records(session), 0))
+        history = all_msgs if ctx_limit == 0 else all_msgs[-ctx_limit:]
+        # ensure slice still starts with 'user'
+        while history and history[0]["role"] != "user":
+            history = history[1:]
     else:
         history = []
 
@@ -666,7 +664,9 @@ def cmd_chat(args):
                 break
 
     params = request_params(cfg, args)
-    client = Anthropic(api_key=api_key)
+    client = Anthropic(api_key=api_key,
+                       timeout=float(cfg.get("timeout", 600.0)),
+                       max_retries=int(cfg.get("max_retries", 2)))
 
     max_rounds = 1 if args.no_continue else int(cfg.get("max_continuations", 1))
     answer, response, used_params, dropped = create_full_answer(
@@ -733,7 +733,9 @@ def cmd_models(args):
     cfg = load_config()
     try:
         api_key = get_api_key()
-        client = Anthropic(api_key=api_key)
+        client = Anthropic(api_key=api_key,
+                           timeout=float(cfg.get("timeout", 600.0)),
+                           max_retries=int(cfg.get("max_retries", 2)))
         resource = getattr(client, "models", None)
         if resource is None or not hasattr(resource, "list"):
             raise RuntimeError("SDK has no models.list(); upgrade anthropic.")
@@ -781,15 +783,19 @@ def cmd_config(args):
         return
     if args.config_cmd == "set":
         # Support both "set key value" and "set key=value [key=value ...]".
-        if args.pairs:
-            for pair in args.pairs:
-                key, raw = parse_key_value(pair)
-                cfg[key] = parse_setting_value(key, raw)
-        elif args.key is not None:
-            value = args.value if args.value is not None else ""
-            cfg[args.key] = parse_setting_value(args.key, value)
-        else:
+        all_args = [a for a in ([args.key, args.value] + (args.pairs or [])) if a is not None]
+        if not all_args:
             sys.exit("config set requires KEY VALUE or KEY=VALUE pairs.")
+        if any("=" in a for a in all_args):
+            # KEY=VALUE form: every arg must be a pair
+            for pair in all_args:
+                k, raw = parse_key_value(pair)
+                cfg[k] = parse_setting_value(k, raw)
+        else:
+            # KEY VALUE form: exactly two tokens
+            if len(all_args) != 2:
+                sys.exit("Use 'config set KEY VALUE' or 'config set KEY=VALUE ...'.")
+            cfg[all_args[0]] = parse_setting_value(all_args[0], all_args[1])
         save_config(cfg)
         if args.output == "json":
             print(safe_json_dumps(cfg, ensure_ascii=False, indent=2))
@@ -935,7 +941,8 @@ def build_parser():
                     help="Omit temperature/top_p/top_k for this request.")
     sp.add_argument("--context-messages", type=int,
                     help="Override number of history messages sent as context.")
-    sp.add_argument("--session", help=f"Session name (default: '{DEFAULT_SESSION}').")
+    sp.add_argument("-s", "--session", dest="session",
+                    help=f"Session name (default: '{DEFAULT_SESSION}').")
     sp.add_argument("--fresh", action="store_true",
                     help="Do not send previous history (but still save this turn).")
     sp.add_argument("--no-history", action="store_true",

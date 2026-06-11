@@ -1,0 +1,44 @@
+# Dagvane — runtime dependencies
+.venv/
+venv/
+env/
+ENV/
+
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Test / coverage / type-check caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Dagvane session state ---
+# NOTE: These rules matter if a session directory (.dagvane/) is ever created
+# inside this repository (e.g. for local testing). Secrets and local history
+# must never be committed.
+.dagvane/secrets.env
+.dagvane/cache/
+.dagvane/sessions/
+
+# If you want to ignore session state entirely, uncomment:
+# .dagvane/
+
+# --- Environment / secrets ---
+.env
+*.env
+!.env.example
+secrets.env

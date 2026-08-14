@@ -1,0 +1,31 @@
+{
+  "round": 4,
+  "valid": true,
+  "source_commit": "8e2845dbd780175cbace23f2d9467bdf77d4520a",
+  "primary_draft_sha256": "5185c38d2a1bf696830e12e8387f8e93c163682eb92aedce1462490bd7e59669",
+  "audit_sha256": "75857530f10f6d7bccb4f6ffdda5961f18c2c5ede5590a912aadcd7eb7ac1cae",
+  "final_bundle_sha256": "a01d4c4508dfb8309b862c1dd3c796e98137a8e6c3ebe822b166e8d107e69190",
+  "decision_files": [
+    {
+      "path": "round4/decision/ARCHITECTURE_DECISION.md",
+      "sha256": "4f567e25ffa845b46ada69ccbaa2ef70007954ee7ae6a143af25d1ab9d52a2b5",
+      "bytes": 68907
+    },
+    {
+      "path": "round4/decision/IMPLEMENTATION_SEQUENCE.md",
+      "sha256": "3dda0ba81fccf0faedee423acef620cbd7dba096173dfe506a4bb38df8c2cd80",
+      "bytes": 19290
+    },
+    {
+      "path": "round4/decision/MILESTONE_0_SPEC.md",
+      "sha256": "459a1a22e373b4506aa2c21d5c6baa1c7972d3c70e4741d1993aa583b2bbc9c8",
+      "bytes": 15250
+    },
+    {
+      "path": "round4/decision/ACCEPTANCE_CRITERIA.md",
+      "sha256": "3e5b5e50823f5e2b1edda42d397c6239557a8b285462b95dd4f855f0366cb3dc",
+      "bytes": 21398
+    }
+  ],
+  "errors": []
+}

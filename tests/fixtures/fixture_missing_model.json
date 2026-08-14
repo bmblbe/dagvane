@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "run_id": "r-missing-0001",
+  "clock": { "start": "2026-01-01T00:00:00.000Z", "step_ms": 10 },
+  "ids": { "seed": "g0" },
+  "responses": {
+    "fake-proposer-a": {
+      "text": "Proposal Alpha: use a flat file layout keyed by content hash."
+    },
+    "fake-proposer-b": {
+      "text": "Proposal Beta: use nested directories sharded by hash prefix."
+    },
+    "fake-reviewer-a": {
+      "text": "Review of candidate-2: sharding adds complexity without measured need."
+    },
+    "fake-judge": {
+      "text": "{\"decision_version\": 1, \"winner\": \"candidate-1\", \"rationale\": \"Unreachable: the run fails at review-by-b.\"}"
+    }
+  }
+}

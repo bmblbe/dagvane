@@ -1,0 +1,7 @@
+{
+  "task_version": 1,
+  "task_id": "t-low-budget",
+  "title": "Pick a storage layout",
+  "statement": "Choose between a flat file layout and a nested directory layout for run artifacts.",
+  "budget": { "max_calls": 2 }
+}

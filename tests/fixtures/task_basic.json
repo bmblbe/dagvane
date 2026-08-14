@@ -1,0 +1,10 @@
+{
+  "task_version": 1,
+  "task_id": "t-basic",
+  "title": "Pick a storage layout",
+  "statement": "Choose between a flat file layout and a nested directory layout for run artifacts.",
+  "acceptance_criteria": [
+    "The choice is justified against crash-safety.",
+    "The layout is stable under replay."
+  ]
+}

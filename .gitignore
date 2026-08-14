@@ -33,6 +33,7 @@ htmlcov/
 .dagvane/secrets.env
 .dagvane/cache/
 .dagvane/sessions/
+.dagvane/runs/
 
 # If you want to ignore session state entirely, uncomment:
 # .dagvane/
@@ -40,5 +41,4 @@ htmlcov/
 # --- Environment / secrets ---
 .env
 *.env
-!.env.example
 secrets.env

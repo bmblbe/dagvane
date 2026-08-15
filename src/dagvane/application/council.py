@@ -1,7 +1,6 @@
 """The council-v1 engine: fixed template, validator, budget ledger, worker, executor.
 
-Consolidated application module for the G0 walking skeleton (per the approved
-plan): everything that turns a TaskSpec into a durable, judged council run.
+This application module turns a TaskSpec into a durable, judged council run.
 The executor knows no concrete backend or store — it works against the ports.
 
 Durable-event ordering per action: serialize → journal append (fsync) → frame

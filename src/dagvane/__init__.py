@@ -1,3 +1,3 @@
-"""Dagvane engine — greenfield walking skeleton (G0)."""
+"""Dagvane's durable multi-model engineering orchestration engine."""
 
 __version__ = "0.3.0.dev0"

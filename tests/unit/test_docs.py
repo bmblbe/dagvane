@@ -52,6 +52,16 @@ STALE_ACTIVE_MARKERS = (
     "docs/development/ORCHESTRAL_WORKFLOW.md",
 )
 
+RETIRED_ACTIVE_DOCS = (
+    Path("docs/development/CURRENT_STATE.md"),
+    Path("docs/development/ORCHESTRAL_WORKFLOW.md"),
+    Path("docs/implementation/MASTER_PLAN.md"),
+    Path("docs/architecture/README.md"),
+    Path("docs/architecture/modules/README.md"),
+    Path("docs/architecture/modules/autodev/ARCHITECTURE.md"),
+    Path("docs/architecture/modules/backends/PLAN.md"),
+)
+
 MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 
 ARCHIVE_HASHES = {
@@ -144,6 +154,13 @@ def test_active_docs_carry_no_retired_paths_or_legacy_claims() -> None:
     for marker in STALE_ACTIVE_MARKERS:
         assert marker not in active_text, f"active docs still mention stale {marker!r}"
     assert not re.search(r"\bMIT\b", active_text), "active docs must not claim a license"
+
+
+def test_retired_document_paths_are_not_active() -> None:
+    for relative in RETIRED_ACTIVE_DOCS:
+        assert not (REPO_ROOT / relative).exists(), (
+            f"retired document must live only in the dated archive: {relative}"
+        )
 
 
 def test_agent_onboarding_uses_the_new_authority_order() -> None:

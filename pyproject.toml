@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dagvane"
-description = "Dagvane engine: durable, replayable, budget-capped multi-model council runs."
+description = "Durable, evidence-driven orchestration for multi-model engineering workflows."
 requires-python = ">=3.11"
 dependencies = []
 dynamic = ["version"]

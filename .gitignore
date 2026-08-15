@@ -26,21 +26,13 @@ dist/
 htmlcov/
 .tox/
 
-# --- Dagvane session state ---
-# NOTE: These rules matter if a session directory (.dagvane/) is ever created
-# inside this repository (e.g. for local testing). Secrets and local history
-# must never be committed.
-.dagvane/secrets.env
-.dagvane/cache/
-.dagvane/sessions/
-.dagvane/runs/
+# --- Dagvane workspace/runtime/controller state ---
+# Durable state can contain conversations, prompts, provider output and local
+# review evidence. None of it belongs in the product repository.
+.dagvane/
 
-# --- Local orchestral-development workspace (never committed; see
-# docs/development/ORCHESTRAL_WORKFLOW.md) ---
-.dagvane/dev/
-
-# If you want to ignore session state entirely, uncomment:
-# .dagvane/
+# --- Editor-local state ---
+.kateproject
 
 # --- Environment / secrets ---
 .env

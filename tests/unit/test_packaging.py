@@ -30,3 +30,14 @@ def test_zero_runtime_dependencies_and_cli_entry() -> None:
     assert isinstance(project, dict)
     assert project["dependencies"] == []
     assert project["scripts"] == {"dagvane": "dagvane.cli:main"}
+
+
+def test_workspace_state_and_legacy_editor_config_stay_untracked() -> None:
+    ignore_rules = {
+        line.strip()
+        for line in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert ".dagvane/" in ignore_rules
+    assert ".kateproject" in ignore_rules
+    assert not (REPO_ROOT / ".kateproject").exists()

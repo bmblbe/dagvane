@@ -17,6 +17,7 @@
 | Autonomous Developer | **REVISE — 4 BLOCKER + 7 MAJOR** |
 | Committed suite на baseline | `359 passed, 1 skipped`; Ruff clean; mypy strict clean |
 | Documentation reset | Accepted `732a007b2c0e2421177eb8b1ffd63301c3b511eb`; `364 passed, 1 skipped`; Ruff/mypy clean |
+| Repository hygiene | Accepted `c960c6b9f4f1e42bab1c237ca6b9543a57905d98`; `366 passed, 1 skipped`; Ruff/mypy clean |
 | MilHRMS | Відкладено до повного RC1 за owner decision |
 
 Review `324f6c5…` був exact-SHA adversarial review, а не переказом Claude

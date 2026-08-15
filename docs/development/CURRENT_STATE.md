@@ -9,18 +9,15 @@ changes; do not turn it into a diary).*
   the crossover from "Claude develops Dagvane" to "Dagvane develops software
   autonomously" is usable for MilHRMS now.
 - **G1 hardening:** the independent Codex acceptance review (REVISE, findings
-  B1–B6/M1–M5/N1 against candidate `2024bd2`) was remediated in two rounds:
-  `4055c3e` (scrubbing boundary, exact loopback semantics, per-component
-  usage truthfulness, conservative cancellation accounting, replay ceiling
-  validation, client lifecycle, PoolTimeout pre-send, reservation cleanup,
-  credential_env validation) and, after the exact-SHA Codex R2 re-review
-  (`REVIEW_R2.md`, REVISE with residuals),
-  `56649a64cec97f7ea6043d07e08fd4215812df5a` (marker-collision refusal +
-  depth-2 rendering closure, enforced process-wide scrub registry,
-  failure-body usage preservation, watchdog grace behind transport timers,
-  replay cancellation rules, whole-lifetime node cancellation guard).
-  Final focused Codex R3 verdict: see
-  `.dagvane/dev/current/agents/codex/REVIEW_R3.md`.
+  B1–B6/M1–M5/N1 against candidate `2024bd2`) was remediated in three rounds
+  with an exact-SHA Codex re-review after each: `4055c3e` (round 1 → R2:
+  REVISE), `56649a6` (round 2 → R3: REVISE, two residual B2/B4 blockers),
+  and `70e1e5f2ebfc64b90275da424f5f4f4184fbf5de` (round 3: marker-boundary
+  refusal in the scrub registry; provider-reported usage on 4xx/429
+  committed, never released). **Final focused Codex R4 verdict at `70e1e5f`:
+  PASS — G1 accepted locally, no confirmed BLOCKER/MAJOR remains.** Review
+  artifacts: `.dagvane/dev/current/agents/codex/REVIEW.md` (original,
+  immutable), `REVIEW_R2.md`, `REVIEW_R3.md`, `REVIEW_R4.md`.
 - **Autonomous Developer MVP:** commit `37ffdfd417cab87b9bdbb6c9d0d031da48248d99`
   — workspace chat over durable LogicalConversations, workspace config CLI,
   frozen Goal Contracts (exact base SHA + objective acceptance-check
@@ -49,7 +46,7 @@ uv sync --python 3.11 --extra dev --locked
 uv run pytest && uv run ruff check . && uv run mypy
 ```
 
-At `56649a6`: **329 passed, 1 skipped** (opt-in live suite), ruff clean,
+At `70e1e5f`: **333 passed, 1 skipped** (opt-in live suite), ruff clean,
 strict mypy clean, Python 3.11.15. The default suite is offline and
 provider-free (external agents are faked through the `command` runtime).
 

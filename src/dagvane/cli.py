@@ -32,6 +32,13 @@ from dagvane.application.council import (
     run_council_live,
 )
 from dagvane.application.replay import derived_status_doc, fold_frames
+from dagvane.cli_workspace import (
+    add_workspace_parsers,
+    cmd_chat,
+    cmd_config,
+    cmd_conversations,
+    cmd_goal,
+)
 from dagvane.domain.models import (
     DagvaneError,
     EventEnvelope,
@@ -123,6 +130,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="emit only frames with seq greater than this value",
     )
     events.add_argument("--output", choices=["ndjson"], default="ndjson")
+
+    add_workspace_parsers(commands)
 
     return parser
 
@@ -315,6 +324,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_runs_show(args)
         if args.command == "events":
             return _cmd_events(args)
+        if args.command == "chat":
+            return cmd_chat(args)
+        if args.command == "conversations":
+            return cmd_conversations(args)
+        if args.command == "config":
+            return cmd_config(args)
+        if args.command == "goal":
+            return cmd_goal(args)
         raise AssertionError(f"unhandled command {args.command!r}")
     except (SpecError, PlanValidationError) as exc:
         _diag(f"error: {exc}")

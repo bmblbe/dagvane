@@ -40,10 +40,15 @@ FORBIDDEN_EVERYWHERE = {
 # validation needs standard URL authority parsing (Codex B1 remediation).
 EXEMPT_SUBMODULES = {"urllib.parse"}
 
-# The only files allowed to (lazily) import their one optional live dependency.
+# The only files allowed to (lazily) import their one optional live dependency,
+# plus the two designated process-execution adapters of the Autonomous
+# Developer MVP: the generic ExternalAgent subprocess runner and the local
+# git/verification executor. Process spawning stays banned everywhere else.
 LIVE_ADAPTER_ALLOWLIST: dict[Path, set[str]] = {
     Path("adapters") / "backends" / "anthropic.py": {"anthropic"},
     Path("adapters") / "backends" / "openai_compat.py": {"httpx"},
+    Path("adapters") / "agents" / "subprocess_runner.py": {"subprocess"},
+    Path("adapters") / "localexec.py": {"subprocess"},
 }
 
 # Wall-clock and identifier entropy may only enter through the runtime port.

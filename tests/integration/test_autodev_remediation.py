@@ -298,6 +298,39 @@ def test_prepare_is_draft_only_and_baseline_runs_post_approval_in_disposable_wor
     assert not (comp.workspace.worktrees_dir / "draft-goal-baseline").exists()
 
 
+def test_interrupted_baseline_is_retried_at_goal_run(tmp_path: Path) -> None:
+    """An approval interrupted mid-baseline leaves `pending`; `goal run`
+    collects the baseline first — idempotently, in a fresh disposable
+    worktree — before any run state is created."""
+    root = tmp_path / "project"
+    _init_repo(root)
+    command = _agent_script(tmp_path, "writer.py", MARKER_WRITER)
+    _write_config(
+        root,
+        resources={"fake-agent": _resource(command)},
+        goal={"implement_resource": "fake-agent", "review_policy": "never"},
+    )
+    comp = Composition(root)
+    _approved_goal(
+        comp,
+        "pending-baseline",
+        checks=[("marker", "test -f marker.txt")],
+        baseline_completed=False,
+    )
+    # Simulate a stale worktree left by the interrupted first collection.
+    stale = comp.workspace.worktrees_dir / "pending-baseline-baseline"
+    GitOps.worktree_add(root, stale, GitOps.head_sha(root))
+
+    status = _goal_runner(comp).start("pending-baseline")
+    assert status is GoalStatus.ACHIEVED
+    reloaded = comp.goals.load("pending-baseline")
+    assert reloaded.baseline["status"] == "completed"
+    retried_checks = reloaded.baseline["checks"]
+    assert isinstance(retried_checks, dict)
+    assert retried_checks["marker"]["ok"] is False  # unmet at base
+    assert not stale.exists()  # the retry replaced and removed the stale worktree
+
+
 def test_prepare_refuses_a_dirty_repository(tmp_path: Path) -> None:
     root = tmp_path / "project"
     _init_repo(root)

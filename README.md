@@ -6,7 +6,7 @@ budget-capped run of cooperating model calls — currently the fixed
 `council-v1` template: independent proposers, blind cross-review, and a judge.
 
 This repository is the **greenfield implementation** adopted by
-`docs/architecture/OWNER_AMENDMENT_001_GREENFIELD_REWRITE.md`. The previous
+`docs/architecture/decisions/OWNER_AMENDMENT_001_GREENFIELD_REWRITE.md`. The previous
 prototype was retired; its history is preserved through the Git archive
 branch and tag described there.
 

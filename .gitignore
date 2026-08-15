@@ -35,6 +35,10 @@ htmlcov/
 .dagvane/sessions/
 .dagvane/runs/
 
+# --- Local orchestral-development workspace (never committed; see
+# docs/development/ORCHESTRAL_WORKFLOW.md) ---
+.dagvane/dev/
+
 # If you want to ignore session state entirely, uncomment:
 # .dagvane/
 

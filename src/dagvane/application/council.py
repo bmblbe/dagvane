@@ -35,9 +35,12 @@ from dagvane.domain.models import (
     ROLE_JUDGE,
     ROLE_PROPOSER,
     ROLE_REVIEWER,
+    USAGE_SOURCE_CEILING,
+    USAGE_SOURCE_PROVIDER,
     ArtifactRef,
     ArtifactWritten,
     Attempt,
+    BackendDispatchError,
     BackendError,
     Budget,
     BudgetExceededError,
@@ -48,9 +51,11 @@ from dagvane.domain.models import (
     EventEnvelope,
     EventPayload,
     InputManifest,
+    InvocationReceipt,
     ManifestEntry,
     ModelCompleted,
     ModelDispatched,
+    ModelFailed,
     ModelRoute,
     NodeCompleted,
     NodeFailed,
@@ -86,6 +91,7 @@ from dagvane.protocol.documents import (
     parse_decision,
 )
 from dagvane.protocol.frames import canonical_json_bytes, sha256_hex
+from dagvane.protocol.profiles import COUNCIL_ROLE_SLOTS, ProfileSpec
 
 FrameSink = Callable[[bytes, EventEnvelope], None]
 
@@ -141,7 +147,9 @@ class CouncilTemplate:
         )
 
     @staticmethod
-    def build(task: TaskSpec) -> tuple[Plan, dict[str, ModelRoute], Budget]:
+    def fake_role_routes() -> dict[str, ModelRoute]:
+        """The G0 deterministic routes, one per council role slot."""
+
         def route(name: str) -> ModelRoute:
             return ModelRoute(
                 route_id=f"fake/{name}",
@@ -151,16 +159,26 @@ class CouncilTemplate:
                 max_output_tokens=_FAKE_MAX_OUTPUT_TOKENS,
             )
 
-        routes = {
-            r.route_id: r
-            for r in (
-                route("proposer-a"),
-                route("proposer-b"),
-                route("reviewer-a"),
-                route("reviewer-b"),
-                route("judge"),
-            )
+        return {
+            "proposer_a": route("proposer-a"),
+            "proposer_b": route("proposer-b"),
+            "reviewer_a": route("reviewer-a"),
+            "reviewer_b": route("reviewer-b"),
+            "judge": route("judge"),
         }
+
+    @staticmethod
+    def build(
+        task: TaskSpec, role_routes: Mapping[str, ModelRoute] | None = None
+    ) -> tuple[Plan, dict[str, ModelRoute], Budget]:
+        if role_routes is None:
+            role_routes = CouncilTemplate.fake_role_routes()
+        if set(role_routes.keys()) != set(COUNCIL_ROLE_SLOTS):
+            raise PlanValidationError(
+                f"council role routes must cover exactly {sorted(COUNCIL_ROLE_SLOTS)!r}, "
+                f"got {sorted(role_routes.keys())!r}"
+            )
+        routes = {r.route_id: r for r in role_routes.values()}
         task_entry = ManifestEntry(kind=ENTRY_KIND_TASK, label="task", producer=None)
         candidate_1 = ManifestEntry(
             kind=ENTRY_KIND_PROPOSAL, label="candidate-1", producer="proposer-a"
@@ -173,7 +191,7 @@ class CouncilTemplate:
                 node_id="proposer-a",
                 role=ROLE_PROPOSER,
                 identity="A",
-                route_id="fake/proposer-a",
+                route_id=role_routes["proposer_a"].route_id,
                 depends_on=(),
                 input_manifest=InputManifest(entries=(task_entry,)),
             ),
@@ -181,7 +199,7 @@ class CouncilTemplate:
                 node_id="proposer-b",
                 role=ROLE_PROPOSER,
                 identity="B",
-                route_id="fake/proposer-b",
+                route_id=role_routes["proposer_b"].route_id,
                 depends_on=(),
                 input_manifest=InputManifest(entries=(task_entry,)),
             ),
@@ -191,7 +209,7 @@ class CouncilTemplate:
                 node_id="review-by-a",
                 role=ROLE_REVIEWER,
                 identity="A",
-                route_id="fake/reviewer-a",
+                route_id=role_routes["reviewer_a"].route_id,
                 depends_on=("proposer-a", "proposer-b"),
                 input_manifest=InputManifest(entries=(task_entry, candidate_2)),
             ),
@@ -199,7 +217,7 @@ class CouncilTemplate:
                 node_id="review-by-b",
                 role=ROLE_REVIEWER,
                 identity="B",
-                route_id="fake/reviewer-b",
+                route_id=role_routes["reviewer_b"].route_id,
                 depends_on=("proposer-a", "proposer-b"),
                 input_manifest=InputManifest(entries=(task_entry, candidate_1)),
             ),
@@ -207,7 +225,7 @@ class CouncilTemplate:
                 node_id="judge",
                 role=ROLE_JUDGE,
                 identity="J",
-                route_id="fake/judge",
+                route_id=role_routes["judge"].route_id,
                 depends_on=("review-by-a", "review-by-b"),
                 input_manifest=InputManifest(
                     entries=(
@@ -615,6 +633,24 @@ class WorkerResult:
     cost_microusd: int
 
 
+def route_fingerprint(route: ModelRoute) -> str:
+    """Content hash of one route's canonical document (including its id)."""
+    doc = build_routes_doc({route.route_id: route})
+    return sha256_hex(canonical_json_bytes(doc))
+
+
+def validate_backend_coverage(
+    routes: Mapping[str, ModelRoute], backends: Mapping[str, ChatBackend]
+) -> None:
+    """Every route must resolve to a registered backend connection — before the run."""
+    missing = sorted({route.backend for route in routes.values()} - set(backends.keys()))
+    if missing:
+        raise PlanValidationError(
+            f"routes reference unknown backend connections {missing!r}; "
+            f"registered: {sorted(backends.keys())!r}"
+        )
+
+
 class OneShotModelWorker:
     """Executes one node attempt: render → snapshot → reserve → dispatch → persist.
 
@@ -625,17 +661,60 @@ class OneShotModelWorker:
     def __init__(
         self,
         *,
-        backend: ChatBackend,
+        backends: Mapping[str, ChatBackend],
         ledger: BudgetLedger,
         artifacts: ArtifactStore,
         ids: IdSource,
         emit: Callable[..., None],
     ) -> None:
-        self._backend = backend
+        self._backends = backends
         self._ledger = ledger
         self._artifacts = artifacts
         self._ids = ids
         self._emit = emit
+
+    def _emit_receipt(
+        self,
+        *,
+        node: PlanNode,
+        attempt: Attempt,
+        route: ModelRoute,
+        receipt: InvocationReceipt,
+        request_sha256: str,
+        response_sha256: str | None,
+        usage: Usage | None,
+        cost_microusd: int | None,
+        error_kind: str | None,
+        usage_source: str | None,
+    ) -> None:
+        """Persist per-dispatch provenance (the G1 ContextSnapshot seam, ADR-0001)."""
+        doc: dict[str, object] = {
+            "receipt_version": 1,
+            "backend_kind": receipt.backend_kind,
+            "connection_id": receipt.connection_id,
+            "provider_request_id": receipt.provider_request_id,
+            "latency_ms": receipt.latency_ms,
+            "model": route.model,
+            "route_id": route.route_id,
+            "route_fingerprint": route_fingerprint(route),
+            "request_sha256": request_sha256,
+            "response_sha256": response_sha256,
+            "input_tokens": usage.input_tokens if usage is not None else None,
+            "output_tokens": usage.output_tokens if usage is not None else None,
+            "cost_microusd": cost_microusd,
+            "error_kind": error_kind,
+            "usage_source": usage_source,
+        }
+        ref = self._artifacts.put(
+            canonical_json_bytes(doc), media_type="application/json", role="receipt"
+        )
+        self._emit(
+            ArtifactWritten(
+                sha256=ref.sha256, size=ref.size, media_type=ref.media_type, role=ref.role
+            ),
+            node_id=node.node_id,
+            attempt=attempt.index,
+        )
 
     async def execute(
         self,
@@ -714,8 +793,62 @@ class OneShotModelWorker:
             operation_id=operation_id,
             call_id=call_id,
         )
+        backend = self._backends[route.backend]
         try:
-            result = await self._backend.complete(request)
+            result = await backend.complete(request)
+        except BackendDispatchError as exc:
+            # A normalized live-dispatch failure. If the provider may have
+            # billed the call, commit it honestly (provider-reported actuals
+            # when available, otherwise the reservation ceiling) and close the
+            # dispatch with a durable model.failed event.
+            if not exc.billed:
+                self._ledger.release(reservation)
+                if exc.receipt is not None:
+                    self._emit_receipt(
+                        node=node, attempt=attempt, route=route, receipt=exc.receipt,
+                        request_sha256=request_ref.sha256, response_sha256=None,
+                        usage=None, cost_microusd=None, error_kind=exc.kind,
+                        usage_source=None,
+                    )
+                raise
+            if exc.usage is not None:
+                billed_usage = exc.usage
+                usage_source = USAGE_SOURCE_PROVIDER
+                billed_cost = dispatch_cost_microusd(
+                    billed_usage.input_tokens, billed_usage.output_tokens, route.pricing
+                )
+            else:
+                billed_usage = Usage(
+                    input_tokens=estimated_input, output_tokens=route.max_output_tokens
+                )
+                usage_source = USAGE_SOURCE_CEILING
+                billed_cost = reserve_cost
+            # Honest accounting first; a breach here is not raised separately —
+            # the node already fails as backend_error and the run cannot
+            # complete successfully with a failed node.
+            self._ledger.commit(reservation, billed_usage, billed_cost)
+            if exc.receipt is not None:
+                self._emit_receipt(
+                    node=node, attempt=attempt, route=route, receipt=exc.receipt,
+                    request_sha256=request_ref.sha256, response_sha256=None,
+                    usage=exc.usage, cost_microusd=billed_cost, error_kind=exc.kind,
+                    usage_source=usage_source,
+                )
+            self._emit(
+                ModelFailed(
+                    reason=exc.kind,
+                    message=str(exc),
+                    billed_input_tokens=billed_usage.input_tokens,
+                    billed_output_tokens=billed_usage.output_tokens,
+                    billed_cost_microusd=billed_cost,
+                    usage_source=usage_source,
+                ),
+                node_id=node.node_id,
+                attempt=attempt.index,
+                operation_id=operation_id,
+                call_id=call_id,
+            )
+            raise
         except BaseException:
             # Fake backends bill nothing on failure (see BudgetLedger docstring):
             # release the reservation on any failure so admission stays exact.
@@ -763,6 +896,13 @@ class OneShotModelWorker:
             operation_id=operation_id,
             call_id=call_id,
         )
+        if result.receipt is not None:
+            self._emit_receipt(
+                node=node, attempt=attempt, route=route, receipt=result.receipt,
+                request_sha256=request_ref.sha256, response_sha256=output_ref.sha256,
+                usage=result.usage, cost_microusd=cost, error_kind=None,
+                usage_source=USAGE_SOURCE_PROVIDER,
+            )
         if breach is not None:
             raise BudgetExceededError(
                 dimension=breach.dimension, committed=breach.committed, cap=breach.cap
@@ -792,7 +932,7 @@ class RunExecutor:
         *,
         run: Run,
         store: RunStore,
-        backend: ChatBackend,
+        backends: Mapping[str, ChatBackend],
         clock: Clock,
         ids: IdSource,
         run_created: RunCreated,
@@ -800,7 +940,7 @@ class RunExecutor:
     ) -> None:
         self._run = run
         self._store = store
-        self._backend = backend
+        self._backends = backends
         self._clock = clock
         self._ids = ids
         self._run_created = run_created
@@ -857,7 +997,7 @@ class RunExecutor:
         try:
             artifacts = self._store.artifact_store(self._run.run_id)
             worker = OneShotModelWorker(
-                backend=self._backend,
+                backends=self._backends,
                 ledger=self._ledger,
                 artifacts=artifacts,
                 ids=self._ids,
@@ -1058,27 +1198,22 @@ class CouncilRunResult:
     sink_error: str | None = None
 
 
-def run_council(
+def _execute_council(
     *,
     task: LoadedTask,
-    fixture: FixtureSpec,
+    plan: Plan,
+    routes: dict[str, ModelRoute],
+    budget: Budget,
+    backends: Mapping[str, ChatBackend],
+    clock: Clock,
+    ids: IdSource,
+    run_id: str,
+    config_sha256: str,
+    determinism_doc: dict[str, object],
     store: RunStore,
-    backend: ChatBackend,
-    sink: FrameSink | None = None,
+    sink: FrameSink | None,
 ) -> CouncilRunResult:
-    """Execute one council run to a terminal state and persist all derived views."""
-    plan, routes, budget = CouncilTemplate.build(task.spec)
-    PlanValidator().validate(plan, routes)
-
-    clock: Clock
-    if fixture.clock_start is not None and fixture.clock_step_ms is not None:
-        clock = FixedClock(fixture.clock_start, fixture.clock_step_ms)
-    else:
-        clock = SystemClock()
-    ids: IdSource
-    ids = SequentialIds(fixture.ids_seed) if fixture.ids_seed is not None else SystemIds()
-    run_id = fixture.run_id if fixture.run_id is not None else ids.new_id("run")
-
+    """Shared execution path for fixture and live councils."""
     run = Run(
         run_id=run_id,
         task=task.spec,
@@ -1103,21 +1238,21 @@ def run_council(
             plan_sha256=plan_sha256,
             routes_doc=build_routes_doc(routes),
             budget_doc=build_budget_doc(budget),
-            fixture_sha256=fixture.sha256,
-            determinism_doc=fixture.determinism_doc(),
+            fixture_sha256=config_sha256,
+            determinism_doc=determinism_doc,
         ),
     )
     executor = RunExecutor(
         run=run,
         store=store,
-        backend=backend,
+        backends=backends,
         clock=clock,
         ids=ids,
         run_created=RunCreated(
             engine_version=__version__,
             task_sha256=task.sha256,
             plan_sha256=plan_sha256,
-            fixture_sha256=fixture.sha256,
+            fixture_sha256=config_sha256,
             node_count=len(plan.nodes),
             max_calls=budget.max_calls,
             max_total_tokens=budget.max_total_tokens,
@@ -1128,4 +1263,83 @@ def run_council(
     status, report_doc = asyncio.run(executor.execute())
     return CouncilRunResult(
         run_id=run_id, status=status, report_doc=report_doc, sink_error=executor.sink_error
+    )
+
+
+def run_council(
+    *,
+    task: LoadedTask,
+    fixture: FixtureSpec,
+    store: RunStore,
+    backend: ChatBackend,
+    sink: FrameSink | None = None,
+) -> CouncilRunResult:
+    """Execute one deterministic fixture council run (the G0 path, unchanged)."""
+    plan, routes, budget = CouncilTemplate.build(task.spec)
+    PlanValidator().validate(plan, routes)
+    backends: Mapping[str, ChatBackend] = {"fake": backend}
+    validate_backend_coverage(routes, backends)
+
+    clock: Clock
+    if fixture.clock_start is not None and fixture.clock_step_ms is not None:
+        clock = FixedClock(fixture.clock_start, fixture.clock_step_ms)
+    else:
+        clock = SystemClock()
+    ids: IdSource
+    ids = SequentialIds(fixture.ids_seed) if fixture.ids_seed is not None else SystemIds()
+    run_id = fixture.run_id if fixture.run_id is not None else ids.new_id("run")
+
+    return _execute_council(
+        task=task,
+        plan=plan,
+        routes=routes,
+        budget=budget,
+        backends=backends,
+        clock=clock,
+        ids=ids,
+        run_id=run_id,
+        config_sha256=fixture.sha256,
+        determinism_doc=fixture.determinism_doc(),
+        store=store,
+        sink=sink,
+    )
+
+
+def run_council_live(
+    *,
+    task: LoadedTask,
+    profile: ProfileSpec,
+    backends: Mapping[str, ChatBackend],
+    store: RunStore,
+    sink: FrameSink | None = None,
+    clock: Clock | None = None,
+    ids: IdSource | None = None,
+) -> CouncilRunResult:
+    """Execute one live council run against profile-configured backends.
+
+    ``backends`` maps connection ids to constructed adapters (the composition
+    root builds them; credential values never travel through this layer).
+    The manifest/`run.created` config hash is the profile file's sha256.
+    """
+    plan, routes, budget = CouncilTemplate.build(task.spec, profile.role_routes())
+    PlanValidator().validate(plan, routes)
+    validate_backend_coverage(routes, backends)
+
+    resolved_clock: Clock = clock if clock is not None else SystemClock()
+    resolved_ids: IdSource = ids if ids is not None else SystemIds()
+    run_id = resolved_ids.new_id("run")
+
+    return _execute_council(
+        task=task,
+        plan=plan,
+        routes=routes,
+        budget=budget,
+        backends=backends,
+        clock=resolved_clock,
+        ids=resolved_ids,
+        run_id=run_id,
+        config_sha256=profile.sha256,
+        determinism_doc={"run_id_pinned": False, "clock": None, "ids_seed": None},
+        store=store,
+        sink=sink,
     )

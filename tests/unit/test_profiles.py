@@ -170,12 +170,76 @@ def test_cleartext_http_to_remote_host_requires_explicit_opt_in() -> None:
 
 
 def test_cleartext_http_to_loopback_needs_no_opt_in() -> None:
-    for host in ("localhost:11434", "127.0.0.1:11434", "[::1]:11434"):
+    for host in (
+        "localhost:11434",
+        "127.0.0.1:11434",
+        "[::1]:11434",
+        "127.0.0.5:8080",  # any actual 127.0.0.0/8 literal is loopback
+        "127.255.255.254",
+    ):
         text = HAPPY_PROFILE.replace(
             'base_url = "https://api.example.test/v1"', f'base_url = "http://{host}/v1"'
         )
         profile = parse_profile(text.encode("utf-8"), source="test-profile")
         assert profile.connections["compat"].base_url == f"http://{host}/v1"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # A DNS name beginning with "127." is not an IP literal (Codex B1).
+        "http://127.evil.example.com/v1",
+        "http://127.0.0.1.evil.example.com/v1",
+        # userinfo must never influence authority classification.
+        "http://127.0.0.1@evil.example.com/v1",
+        "http://localhost@evil.example.com/v1",
+        # loopback-looking bytes in query/fragment/path must not matter.
+        "http://evil.example.com/v1?u=@127.0.0.1",
+        "http://evil.example.com/v1#@127.0.0.1",
+        "http://evil.example.com/@127.0.0.1/v1",
+        # a non-loopback IP literal stays non-loopback.
+        "http://10.0.0.1:11434/v1",
+    ],
+    ids=[
+        "dns-127-prefix",
+        "dns-127-full-prefix",
+        "userinfo-ip",
+        "userinfo-localhost",
+        "query-at-loopback",
+        "fragment-at-loopback",
+        "path-at-loopback",
+        "private-ip",
+    ],
+)
+def test_cleartext_http_loopback_lookalikes_are_rejected(url: str) -> None:
+    """Attacker-controlled remote names must never classify as loopback
+    (Codex B1): the credential would travel unencrypted to a remote host."""
+    text = HAPPY_PROFILE.replace(
+        'base_url = "https://api.example.test/v1"', f'base_url = "{url}"'
+    )
+    with pytest.raises(SpecError, match="allow_insecure_http"):
+        parse_profile(text.encode("utf-8"), source="test-profile")
+
+
+def test_base_url_without_hostname_is_rejected() -> None:
+    text = HAPPY_PROFILE.replace(
+        'base_url = "https://api.example.test/v1"', 'base_url = "http:///v1"'
+    )
+    with pytest.raises(SpecError, match="hostname"):
+        parse_profile(text.encode("utf-8"), source="test-profile")
+
+
+@pytest.mark.parametrize(
+    "name", ["WITH=EQUALS", "1LEADING_DIGIT", "has-dash", "has space", "ключ"]
+)
+def test_credential_env_must_be_a_usable_environment_name(name: str) -> None:
+    """An impossible environment-variable name must fail at the profile
+    boundary with a configuration error, not later as merely 'not set'."""
+    text = HAPPY_PROFILE.replace(
+        'credential_env = "TEST_COMPAT_KEY"', f'credential_env = "{name}"'
+    )
+    with pytest.raises(SpecError, match="credential_env"):
+        parse_profile(text.encode("utf-8"), source="test-profile")
 
 
 def test_max_tokens_field_is_validated_and_defaulted() -> None:

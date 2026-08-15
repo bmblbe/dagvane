@@ -506,9 +506,11 @@ def test_first_event_must_be_run_created() -> None:
 def model_failed(
     reason: str = "timeout",
     *,
+    # Defaults match the ``dispatched()`` reservation (100 tokens, 10 microUSD):
+    # a ceiling-billed failure must commit exactly what its dispatch reserved.
     billed_input: int = 10,
-    billed_output: int = 100,
-    billed_cost: int = 50,
+    billed_output: int = 90,
+    billed_cost: int = 10,
     usage_source: str = "ceiling",
 ) -> ModelFailed:
     return ModelFailed(
@@ -540,18 +542,18 @@ def test_model_failed_closes_dispatch_and_bills_totals() -> None:
             reason="n1: backend_error",
             calls=1,
             input_tokens=10,
-            output_tokens=100,
-            cost_microusd=50,
+            output_tokens=90,
+            cost_microusd=10,
         )
     )
     view = fold_envelopes(journal.envelopes)
     assert view.status is RunStatus.FAILED
     assert view.total_calls == 1
-    assert view.total_cost_microusd == 50
+    assert view.total_cost_microusd == 10
     node = view.nodes["n1"]
     assert node.status is NodeStatus.FAILED
     assert node.input_tokens == 10
-    assert node.output_tokens == 100
+    assert node.output_tokens == 90
 
 
 def test_run_finished_totals_must_include_billed_failures() -> None:
@@ -594,6 +596,87 @@ def test_model_failed_rejects_unknown_reason() -> None:
     journal = billed_failure_journal(model_failed(reason="gremlins"))
     with pytest.raises(ReplayError, match="unknown reason"):
         fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+# --- Codex B6: replay validates ceiling commits against the reservation ----
+
+
+def test_zero_cost_ceiling_failure_must_not_replay_against_nonzero_reservation() -> None:
+    """A hand-built journal understating a billed failure as zero while
+    claiming conservative ceiling accounting must fail to replay."""
+    journal = billed_failure_journal(
+        model_failed(billed_input=0, billed_output=0, billed_cost=0)
+    )
+    journal.add(
+        finished(
+            "failed",
+            reason="n1: backend_error",
+            calls=1,
+            input_tokens=0,
+            output_tokens=0,
+            cost_microusd=0,
+        )
+    )
+    with pytest.raises(ReplayError, match="do not match the dispatch reservation"):
+        fold_envelopes(journal.envelopes)
+
+
+def test_understated_ceiling_failure_must_not_replay() -> None:
+    """Ceiling amounts below (or above) the reservation are equally false."""
+    journal = billed_failure_journal(
+        model_failed(billed_input=10, billed_output=40, billed_cost=10)
+    )
+    with pytest.raises(ReplayError, match="do not match the dispatch reservation"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_ceiling_cost_mismatch_must_not_replay() -> None:
+    journal = billed_failure_journal(
+        model_failed(billed_input=10, billed_output=90, billed_cost=3)
+    )
+    with pytest.raises(ReplayError, match="do not match the dispatch reservation"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_cancelled_ceiling_failure_replays_when_it_matches_the_reservation() -> None:
+    """The G1 cancellation rule: a cancelled dispatch closes at the exact
+    reservation ceiling and must replay cleanly."""
+    journal = billed_failure_journal(model_failed(reason="cancelled"))
+    journal.add(
+        finished(
+            "failed",
+            reason="n1: backend_error",
+            calls=1,
+            input_tokens=10,
+            output_tokens=90,
+            cost_microusd=10,
+        )
+    )
+    view = fold_envelopes(journal.envelopes)
+    assert view.total_cost_microusd == 10
+
+
+def test_mixed_usage_source_is_accepted_without_reservation_equality() -> None:
+    """``mixed`` mingles provider actuals with per-component ceilings; the
+    component split is not journaled, so replay checks non-negativity and
+    totals only (documented weaker invariant)."""
+    journal = billed_failure_journal(
+        model_failed(
+            billed_input=100_000, billed_output=90, billed_cost=77, usage_source="mixed"
+        )
+    )
+    journal.add(
+        finished(
+            "failed",
+            reason="n1: backend_error",
+            calls=1,
+            input_tokens=100_000,
+            output_tokens=90,
+            cost_microusd=77,
+        )
+    )
+    view = fold_envelopes(journal.envelopes)
+    assert view.total_input_tokens == 100_000
 
 
 def test_model_failed_rejects_unknown_usage_source() -> None:

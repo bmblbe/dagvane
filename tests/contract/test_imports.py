@@ -35,6 +35,11 @@ FORBIDDEN_EVERYWHERE = {
     "subprocess",
 }
 
+# Exact submodules exempt from the top-level ban: pure string parsing with no
+# network surface. ``urllib.request``/``urllib.error`` stay banned; profile
+# validation needs standard URL authority parsing (Codex B1 remediation).
+EXEMPT_SUBMODULES = {"urllib.parse"}
+
 # The only files allowed to (lazily) import their one optional live dependency.
 LIVE_ADAPTER_ALLOWLIST: dict[Path, set[str]] = {
     Path("adapters") / "backends" / "anthropic.py": {"anthropic"},
@@ -47,13 +52,14 @@ RUNTIME_PORT = Path("ports") / "runtime.py"
 
 
 def _imported_top_modules(tree: ast.AST) -> set[str]:
-    modules: set[str] = set()
+    """Top-level modules imported, with exact exempt submodules excluded."""
+    full_names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            modules.update(alias.name.split(".")[0] for alias in node.names)
+            full_names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            modules.add(node.module.split(".")[0])
-    return modules
+            full_names.add(node.module)
+    return {name.split(".")[0] for name in full_names if name not in EXEMPT_SUBMODULES}
 
 
 def test_source_tree_has_no_forbidden_imports() -> None:

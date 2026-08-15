@@ -25,9 +25,11 @@ from dagvane.domain.models import (
     DISPATCH_KIND_USAGE_MISSING,
     BackendDispatchError,
     InvocationReceipt,
+    PartialUsage,
     SpecError,
     Usage,
 )
+from dagvane.domain.secrets import SecretScrubber
 from dagvane.ports.backend import ChatResult, PreparedRequest
 from dagvane.ports.runtime import Monotonic, SystemMonotonic
 
@@ -51,6 +53,7 @@ class AnthropicBackend:
         base_url: str | None = None,
         monotonic: Monotonic | None = None,
         client_factory: Callable[[], Any] | None = None,
+        scrubber: SecretScrubber | None = None,
     ) -> None:
         self._connection_id = connection_id
         self._api_key = api_key
@@ -59,6 +62,10 @@ class AnthropicBackend:
         self._monotonic: Monotonic = monotonic if monotonic is not None else SystemMonotonic()
         self._client_factory = client_factory
         self._client: Any | None = None
+        # The shared process-wide registry when provided (cross-provider
+        # scrubbing); this adapter's own credential is always registered.
+        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
+        self._scrubber.register(api_key)
 
     def ensure_ready(self) -> None:
         """Verify the optional SDK is importable — without constructing the
@@ -108,7 +115,10 @@ class AnthropicBackend:
         return self._client
 
     def _redact(self, message: str) -> str:
-        return redact(message, (self._api_key,))
+        return redact(message, self._scrubber)
+
+    def _scrub_opt(self, value: str | None) -> str | None:
+        return self._scrubber.scrub(value) if value is not None else None
 
     def _receipt(self, started_ms: int, provider_request_id: str | None) -> InvocationReceipt:
         return InvocationReceipt(
@@ -143,8 +153,21 @@ class AnthropicBackend:
         )
 
     async def complete(self, request: PreparedRequest) -> ChatResult:
-        client = self._get_client()
         started_ms = self._monotonic.now_ms()
+        try:
+            # Client construction stays inside the normalization boundary: an
+            # SDK constructor rejecting a header/base-URL configuration may
+            # echo credential material in its exception.
+            client = self._get_client()
+        except Exception as exc:
+            raise BackendDispatchError(
+                kind=DISPATCH_KIND_CONNECTION,
+                message=self._redact(
+                    f"client construction failed: {type(exc).__name__}: {exc}"
+                ),
+                billed=False,
+                receipt=self._receipt(started_ms, None),
+            ) from exc
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 message = await client.messages.create(
@@ -165,7 +188,11 @@ class AnthropicBackend:
         except Exception as exc:
             raise self._normalize(exc, started_ms) from exc
 
-        receipt = self._receipt(started_ms, optional_str(getattr(message, "id", None)))
+        # Every provider-derived field is scrubbed before it can be persisted
+        # or forwarded to another provider (success paths included).
+        receipt = self._receipt(
+            started_ms, self._scrub_opt(optional_str(getattr(message, "id", None)))
+        )
 
         parts: list[str] = []
         content = getattr(message, "content", None)
@@ -175,23 +202,26 @@ class AnthropicBackend:
                     text_value = getattr(block, "text", None)
                     if isinstance(text_value, str):
                         parts.append(text_value)
-        text = "".join(parts)
+        text = self._scrubber.scrub("".join(parts))
 
         usage_obj = getattr(message, "usage", None)
         input_tokens = usable_token_count(getattr(usage_obj, "input_tokens", None))
         output_tokens = usable_token_count(getattr(usage_obj, "output_tokens", None))
         if input_tokens is None or output_tokens is None:
+            # Preserve every reliable reported component: partial usage rides
+            # on the error so accounting never discards a known actual.
             raise BackendDispatchError(
                 kind=DISPATCH_KIND_USAGE_MISSING,
                 message=(
-                    "provider response carries no usable token usage; "
-                    "a hard-budget run cannot account this call"
+                    "provider response carries incomplete token usage; "
+                    "unknown components are accounted at the reservation ceiling"
                 ),
                 billed=True,
+                usage=PartialUsage(input_tokens=input_tokens, output_tokens=output_tokens),
                 receipt=receipt,
             )
 
-        model_name = optional_str(getattr(message, "model", None))
+        model_name = self._scrub_opt(optional_str(getattr(message, "model", None)))
         return ChatResult(
             model=model_name if model_name is not None else request.model,
             text=text,

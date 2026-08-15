@@ -320,15 +320,17 @@ def test_live_runs_replay_through_the_events_command(tmp_path: Path) -> None:
     assert view.status is RunStatus.COMPLETED
 
 
-def test_cancelled_dispatch_releases_its_reservation() -> None:
-    """Cancellation propagates through the worker and frees the budget slot."""
+def test_cancelled_dispatch_commits_the_reservation_ceiling() -> None:
+    """Cancellation of a potentially-sent dispatch must not silently release
+    the reservation: it is committed at the ceiling and durably closed with
+    ``model.failed(reason="cancelled", usage_source="ceiling")``."""
     from dagvane.application.council import (
         BudgetLedger,
         CouncilTemplate,
         OneShotModelWorker,
         ResolvedInput,
     )
-    from dagvane.domain.models import ArtifactRef, Attempt, Budget
+    from dagvane.domain.models import ArtifactRef, Attempt, Budget, BudgetRejectedError
 
     class MemoryArtifacts:
         def put(self, data: bytes, *, media_type: str, role: str) -> ArtifactRef:
@@ -359,12 +361,13 @@ def test_cancelled_dispatch_releases_its_reservation() -> None:
         Budget(max_calls=1, max_total_tokens=1_000_000, max_cost_microusd=10_000_000)
     )
     hanging = HangingBackend()
+    emitted: list[Any] = []
     worker = OneShotModelWorker(
         backends={"fake": hanging},
         ledger=ledger,
         artifacts=MemoryArtifacts(),
         ids=Ids(),
-        emit=lambda payload, **kwargs: None,
+        emit=lambda payload, **kwargs: emitted.append(payload),
     )
     role_routes = CouncilTemplate.fake_role_routes()
     route = role_routes["proposer_a"]
@@ -386,9 +389,20 @@ def test_cancelled_dispatch_releases_its_reservation() -> None:
             await task
 
     asyncio.run(scenario())
-    # max_calls=1: the slot is free again only if cancellation released it.
-    reservation = ledger.reserve(tokens=10, cost_microusd=10)
-    assert reservation.calls == 1
+    # max_calls=1: the dispatch may have been billed, so the slot stays
+    # committed — a silent release would underbill.
+    with pytest.raises(BudgetRejectedError):
+        ledger.reserve(tokens=10, cost_microusd=10)
+    failed = [p for p in emitted if getattr(p, "TYPE", "") == "model.failed"]
+    assert len(failed) == 1
+    assert failed[0].reason == "cancelled"
+    assert failed[0].usage_source == "ceiling"
+    totals = ledger.totals()
+    assert totals.calls == 1
+    assert totals.input_tokens + totals.output_tokens == (
+        failed[0].billed_input_tokens + failed[0].billed_output_tokens
+    )
+    assert totals.cost_microusd == failed[0].billed_cost_microusd
 
 
 def test_overlimit_live_output_is_committed_honestly(tmp_path: Path) -> None:
@@ -469,9 +483,19 @@ def test_spontaneous_cancelled_error_fails_the_node_durably(tmp_path: Path) -> N
     node_failed = {
         e["node_id"]: e["data"]["reason"] for e in events if e["type"] == "node.failed"
     }
-    assert node_failed.get("judge") == "unexpected_error"
+    assert node_failed.get("judge") == "cancelled"
+    # The possibly-sent judge dispatch is closed durably at the ceiling — the
+    # dispatched call must not vanish from spend.
+    model_failed = [
+        e for e in events if e["type"] == "model.failed" and e["node_id"] == "judge"
+    ]
+    assert len(model_failed) == 1
+    assert model_failed[0]["data"]["reason"] == "cancelled"
+    assert model_failed[0]["data"]["usage_source"] == "ceiling"
     assert events[-1]["type"] == "run.finished"
     assert events[-1]["data"]["status"] == "failed"
+    committed = result.report_doc["budget"]["committed"]
+    assert committed["calls"] == 5  # four completed + the cancelled judge dispatch
 
     # The journal replays cleanly — no non-terminal node under a terminal run.
     from dagvane.application.replay import fold_frames

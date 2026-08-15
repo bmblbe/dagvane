@@ -14,6 +14,7 @@ from dagvane.domain.models import (
     DISPATCH_KIND_PROTOCOL,
     DISPATCH_KIND_RATE_LIMIT,
 )
+from dagvane.domain.secrets import SecretScrubber
 
 # Normalized error text is journaled inside model.failed/node.failed events;
 # frames are capped at 1 MiB, so provider error bodies must be bounded long
@@ -22,7 +23,9 @@ MAX_ERROR_MESSAGE_CHARS = 2000
 
 # httpx exception class names that prove the request never reached the
 # provider (nothing to bill) — matched by name so test doubles and the lazy
-# import strategy work without importing httpx here.
+# import strategy work without importing httpx here. PoolTimeout belongs here:
+# httpcore raises it while waiting to *acquire* a connection, before the
+# request is physically sent (verified against httpcore 1.0.9).
 PRE_SEND_ERROR_NAMES: frozenset[str] = frozenset(
     {
         "ConnectError",
@@ -31,13 +34,12 @@ PRE_SEND_ERROR_NAMES: frozenset[str] = frozenset(
         "InvalidURL",
         "LocalProtocolError",
         "ProxyError",
+        "PoolTimeout",
     }
 )
 
 # httpx exception class names for timeouts after the request was sent.
-POST_SEND_TIMEOUT_NAMES: frozenset[str] = frozenset(
-    {"ReadTimeout", "WriteTimeout", "PoolTimeout"}
-)
+POST_SEND_TIMEOUT_NAMES: frozenset[str] = frozenset({"ReadTimeout", "WriteTimeout"})
 
 
 def bound_message(message: str, limit: int = MAX_ERROR_MESSAGE_CHARS) -> str:
@@ -47,21 +49,13 @@ def bound_message(message: str, limit: int = MAX_ERROR_MESSAGE_CHARS) -> str:
     return message[:limit] + f"... [truncated {len(message) - limit} chars]"
 
 
-def redact(message: str, secrets: tuple[str, ...]) -> str:
-    """Replace each secret value — including its escaped repr form — then bound.
+def redact(message: str, scrubber: SecretScrubber) -> str:
+    """Scrub every registered secret (all encoded forms), then bound.
 
-    The escaped variant matters: transport libraries repr() header values in
-    their error messages, so a key containing control characters would appear
-    as ``sk-\\nabc`` and dodge a plain exact-match replacement.
+    Scrub-before-truncate is mandatory: truncating first could keep an
+    identifying prefix of a secret straddling the boundary.
     """
-    for secret in secrets:
-        if not secret:
-            continue
-        message = message.replace(secret, "[redacted]")
-        escaped = secret.encode("unicode_escape").decode("ascii")
-        if escaped != secret:
-            message = message.replace(escaped, "[redacted]")
-    return bound_message(message)
+    return bound_message(scrubber.scrub(message))
 
 
 def kind_for_status(status_code: int) -> tuple[str, bool]:

@@ -73,6 +73,9 @@ DISPATCH_KIND_TIMEOUT = "timeout"
 DISPATCH_KIND_CONNECTION = "connection"
 DISPATCH_KIND_PROTOCOL = "protocol"
 DISPATCH_KIND_USAGE_MISSING = "usage_missing"
+# A dispatch cancelled after it may have reached the provider: the ambiguous
+# potentially-sent state is closed durably at the reservation ceiling.
+DISPATCH_KIND_CANCELLED = "cancelled"
 
 BACKEND_DISPATCH_KINDS: frozenset[str] = frozenset(
     {
@@ -83,6 +86,7 @@ BACKEND_DISPATCH_KINDS: frozenset[str] = frozenset(
         DISPATCH_KIND_CONNECTION,
         DISPATCH_KIND_PROTOCOL,
         DISPATCH_KIND_USAGE_MISSING,
+        DISPATCH_KIND_CANCELLED,
     }
 )
 
@@ -92,9 +96,10 @@ class BackendDispatchError(BackendError):
 
     ``billed=True`` means the provider may have processed (and billed) the
     request — the caller must commit the dispatch against the budget instead
-    of releasing its reservation. ``usage`` carries provider-reported usage
-    for the failed call when the provider supplied it. Messages must already
-    be redacted by the adapter that raises this.
+    of releasing its reservation. ``usage`` carries whatever per-component
+    usage the provider reported for the failed call (possibly partial); a
+    known component must never be discarded because another one is missing.
+    Messages must already be redacted by the adapter that raises this.
     """
 
     def __init__(
@@ -103,7 +108,7 @@ class BackendDispatchError(BackendError):
         kind: str,
         message: str,
         billed: bool,
-        usage: Usage | None = None,
+        usage: PartialUsage | None = None,
         receipt: InvocationReceipt | None = None,
     ) -> None:
         if kind not in BACKEND_DISPATCH_KINDS:
@@ -182,13 +187,14 @@ def advance_node_status(current: NodeStatus, target: NodeStatus) -> NodeStatus:
     return target
 
 
-# Closed set of node failure reasons exercised in G0.
+# Closed set of node failure reasons (G0 set + the G1 cancellation reason).
 REASON_DEPENDENCY_FAILED = "dependency_failed"
 REASON_BUDGET_REJECTED = "budget_rejected"
 REASON_BUDGET_EXCEEDED = "budget_exceeded"
 REASON_BACKEND_ERROR = "backend_error"
 REASON_INVALID_DECISION = "invalid_decision"
 REASON_UNEXPECTED_ERROR = "unexpected_error"
+REASON_CANCELLED = "cancelled"
 
 NODE_FAILURE_REASONS: frozenset[str] = frozenset(
     {
@@ -198,6 +204,7 @@ NODE_FAILURE_REASONS: frozenset[str] = frozenset(
         REASON_BACKEND_ERROR,
         REASON_INVALID_DECISION,
         REASON_UNEXPECTED_ERROR,
+        REASON_CANCELLED,
     }
 )
 
@@ -229,6 +236,25 @@ class BudgetOverrides:
 class Usage:
     input_tokens: int
     output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class PartialUsage:
+    """Per-component provider-reported usage where any component may be unknown.
+
+    ``None`` means the provider did not report that component — it is *unknown*,
+    not zero. Accounting substitutes the conservative reservation ceiling for
+    unknown components only; a known component is committed exactly as reported.
+    """
+
+    input_tokens: int | None
+    output_tokens: int | None
+
+    def is_empty(self) -> bool:
+        return self.input_tokens is None and self.output_tokens is None
+
+    def is_complete(self) -> bool:
+        return self.input_tokens is not None and self.output_tokens is not None
 
 
 def estimate_tokens(text: str) -> int:
@@ -433,9 +459,12 @@ class ModelCompleted:
 
 
 # How a billed failed dispatch attributed its committed usage.
-USAGE_SOURCE_PROVIDER = "provider"  # provider reported real usage for the failure
-USAGE_SOURCE_CEILING = "ceiling"  # committed at the reservation ceiling
-USAGE_SOURCES: frozenset[str] = frozenset({USAGE_SOURCE_PROVIDER, USAGE_SOURCE_CEILING})
+USAGE_SOURCE_PROVIDER = "provider"  # provider reported every component
+USAGE_SOURCE_CEILING = "ceiling"  # no component known: full reservation ceiling
+USAGE_SOURCE_MIXED = "mixed"  # known components as reported, unknown at ceiling
+USAGE_SOURCES: frozenset[str] = frozenset(
+    {USAGE_SOURCE_PROVIDER, USAGE_SOURCE_CEILING, USAGE_SOURCE_MIXED}
+)
 
 
 @dataclass(frozen=True, slots=True)

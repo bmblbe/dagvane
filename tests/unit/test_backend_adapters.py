@@ -397,14 +397,29 @@ def test_anthropic_2xx_bearing_exception_is_billed_protocol_failure() -> None:
     assert excinfo.value.billed is True
 
 
-def test_redaction_covers_escaped_credential_forms() -> None:
-    """Transport libraries repr() header values; an escaped key must not leak."""
-    weird_key = "sk-bad\nkey"
-    escaped = weird_key.encode("unicode_escape").decode("ascii")
-    client = FakeAnthropicClient(error=FakeStatusError(500, f"illegal header {escaped}"))
+# A legal printable-ASCII credential the CLI admits: quotes, backslashes,
+# and characters whose JSON/repr renderings differ from the raw bytes.
+TRICKY_KEY = 'sk-tr"ick\\y\'key-11'
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        lambda s: s,  # raw reflection
+        lambda s: s.encode("unicode_escape").decode("ascii"),  # transport repr()
+        lambda s: __import__("json").dumps(s)[1:-1],  # JSON-escaped reflection
+        lambda s: repr(s)[1:-1],  # mixed-quote repr rendering
+    ],
+    ids=["raw", "unicode-escape", "json-escape", "repr"],
+)
+def test_redaction_covers_admitted_credential_encodings(encode: Any) -> None:
+    """Every encoded rendering of a legal printable credential must be
+    scrubbed from normalized error text (Codex B2)."""
+    reflected = encode(TRICKY_KEY)
+    client = FakeAnthropicClient(error=FakeStatusError(500, f"illegal header {reflected}"))
     backend = AnthropicBackend(
         connection_id="anthro",
-        api_key=weird_key,
+        api_key=TRICKY_KEY,
         timeout_seconds=30,
         monotonic=SteppingMonotonic(),
         client_factory=lambda: client,
@@ -412,9 +427,31 @@ def test_redaction_covers_escaped_credential_forms() -> None:
     with pytest.raises(BackendDispatchError) as excinfo:
         asyncio.run(backend.complete(REQUEST))
     message = str(excinfo.value)
-    assert weird_key not in message
-    assert escaped not in message
+    assert TRICKY_KEY not in message
+    assert reflected not in message
     assert "[redacted]" in message
+
+
+def test_compat_snippet_truncation_cannot_expose_a_credential_prefix() -> None:
+    """Scrub-before-truncate: a credential straddling the 300-char body
+    snippet boundary must not survive as an identifying prefix (Codex B2)."""
+    body = "x" * 290 + TRICKY_KEY + "y" * 100
+    client = FakeHttpClient(response=FakeHttpResponse(status_code=503, text=body))
+    backend = OpenAICompatBackend(
+        connection_id="compat",
+        base_url="https://api.example.test/v1",
+        api_key=TRICKY_KEY,
+        timeout_seconds=30,
+        monotonic=SteppingMonotonic(),
+        client_factory=lambda: client,
+    )
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(backend.complete(REQUEST))
+    message = str(excinfo.value)
+    assert TRICKY_KEY not in message
+    # No identifying prefix either: the longest visible run of key bytes must
+    # be far shorter than the credential.
+    assert TRICKY_KEY[:8] not in message
 
 
 def test_adapter_error_messages_are_bounded() -> None:
@@ -462,6 +499,138 @@ def test_anthropic_pre_send_cause_is_not_billed() -> None:
         asyncio.run(anthropic_backend(client).complete(REQUEST))
     assert excinfo.value.kind == "connection"
     assert excinfo.value.billed is False
+
+
+# ---------------------------------------------------------------------------
+# Codex G1 acceptance-review regressions (round 2 hardening)
+# ---------------------------------------------------------------------------
+
+
+def test_compat_pool_timeout_is_pre_send_and_not_billed() -> None:
+    """httpcore raises PoolTimeout while *waiting to acquire* a connection —
+    before the request is physically sent. Billing it at ceiling would consume
+    budget for a request the provider never received (Codex M2)."""
+
+    class PoolTimeout(Exception):
+        pass
+
+    client = FakeHttpClient(error=PoolTimeout("pool exhausted"))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.billed is False
+
+
+def test_anthropic_pool_timeout_cause_is_pre_send_and_not_billed() -> None:
+    class PoolTimeout(Exception):
+        pass
+
+    sdk_error = RuntimeError("transport error")
+    sdk_error.__cause__ = PoolTimeout("pool exhausted")
+    client = FakeAnthropicClient(error=sdk_error)
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(anthropic_backend(client).complete(REQUEST))
+    assert excinfo.value.billed is False
+
+
+@pytest.mark.parametrize("adapter", ["anthropic", "compat"])
+def test_client_construction_failure_is_normalized_and_redacted(adapter: str) -> None:
+    """A constructor exception may echo credential material; it must surface
+    as a normalized, redacted, not-billed dispatch error (Codex M5)."""
+
+    def exploding_factory() -> Any:
+        raise ValueError(f"illegal header value: Bearer {TRICKY_KEY}")
+
+    backend: Any
+    if adapter == "anthropic":
+        backend = AnthropicBackend(
+            connection_id="anthro",
+            api_key=TRICKY_KEY,
+            timeout_seconds=30,
+            monotonic=SteppingMonotonic(),
+            client_factory=exploding_factory,
+        )
+    else:
+        backend = OpenAICompatBackend(
+            connection_id="compat",
+            base_url="https://api.example.test/v1",
+            api_key=TRICKY_KEY,
+            timeout_seconds=30,
+            monotonic=SteppingMonotonic(),
+            client_factory=exploding_factory,
+        )
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(backend.complete(REQUEST))
+    assert excinfo.value.kind == "connection"
+    assert excinfo.value.billed is False
+    message = str(excinfo.value)
+    assert TRICKY_KEY not in message
+    assert "[redacted]" in message
+
+
+def test_anthropic_partial_usage_is_preserved_on_missing_component() -> None:
+    """A known provider-reported component must never be discarded because the
+    other component is missing (Codex B4)."""
+    message = anthropic_message(input_tokens=100_000, output_tokens=None)
+    client = FakeAnthropicClient(result=message)
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(anthropic_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "usage_missing"
+    assert excinfo.value.billed is True
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.input_tokens == 100_000
+    assert excinfo.value.usage.output_tokens is None
+
+
+def test_compat_malformed_choices_keeps_complete_reported_usage() -> None:
+    """A billed 200 whose choices are unusable must still carry the provider's
+    complete reported usage (Codex B4)."""
+    body = compat_body(prompt_tokens=100_000, completion_tokens=17)
+    body["choices"] = "not-a-list"
+    client = FakeHttpClient(response=FakeHttpResponse(body=body))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "protocol"
+    assert excinfo.value.billed is True
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.input_tokens == 100_000
+    assert excinfo.value.usage.output_tokens == 17
+
+
+def test_compat_partial_usage_is_preserved_on_missing_component() -> None:
+    body = compat_body(prompt_tokens=100_000, completion_tokens=None)
+    client = FakeHttpClient(response=FakeHttpResponse(body=body))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "usage_missing"
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.input_tokens == 100_000
+    assert excinfo.value.usage.output_tokens is None
+
+
+def test_success_fields_are_scrubbed_before_leaving_the_adapter() -> None:
+    """Successful response content, model name, and provider request id are
+    provider-derived and must be scrubbed (Codex B3)."""
+    reflected = TRICKY_KEY
+    message = SimpleNamespace(
+        id=f"msg-{reflected}",
+        model=f"model-{reflected}",
+        content=[SimpleNamespace(type="text", text=f"echo: {reflected}")],
+        usage=SimpleNamespace(input_tokens=7, output_tokens=3),
+    )
+    client = FakeAnthropicClient(result=message)
+    backend = AnthropicBackend(
+        connection_id="anthro",
+        api_key=TRICKY_KEY,
+        timeout_seconds=30,
+        monotonic=SteppingMonotonic(),
+        client_factory=lambda: client,
+    )
+    result = asyncio.run(backend.complete(REQUEST))
+    assert TRICKY_KEY not in result.text
+    assert TRICKY_KEY not in result.model
+    assert result.receipt is not None
+    assert result.receipt.provider_request_id is not None
+    assert TRICKY_KEY not in result.receipt.provider_request_id
 
 
 def test_compat_max_tokens_field_is_configurable() -> None:

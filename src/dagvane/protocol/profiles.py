@@ -8,10 +8,13 @@ artifact, or event.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dagvane.domain.models import ModelRoute, Pricing, SpecError
 from dagvane.protocol.frames import sha256_hex
@@ -123,16 +126,39 @@ def _reject_unknown_keys(obj: Mapping[str, object], allowed: frozenset[str], ctx
         raise SpecError(f"{ctx}: unknown keys {unknown!r}")
 
 
-def _is_loopback_host(base_url: str) -> bool:
-    """Best-effort loopback detection without urllib (banned in the engine)."""
-    rest = base_url.split("://", 1)[1]
-    host_port = rest.split("/", 1)[0].rsplit("@", 1)[-1]
-    if host_port.startswith("["):  # IPv6 literal
-        host = host_port[1:].split("]", 1)[0]
-    else:
-        host = host_port.split(":", 1)[0]
-    host = host.lower()
-    return host == "localhost" or host == "::1" or host.startswith("127.")
+# A usable process-environment variable name (portable shell identifier).
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _parse_base_url_host(base_url: str, ctx: str) -> str:
+    """Extract the authority hostname via standard URL parsing.
+
+    Only the parsed hostname classifies the authority: userinfo, port, path,
+    query, and fragment can never influence it. A URL without a hostname is
+    rejected outright.
+    """
+    try:
+        host = urlsplit(base_url).hostname
+    except ValueError as exc:
+        raise SpecError(f"{ctx}: base_url is not a valid URL: {exc}") from exc
+    if not host:
+        raise SpecError(f"{ctx}: base_url carries no hostname")
+    return host
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Exact loopback semantics: ``localhost`` or an actual loopback IP literal.
+
+    A DNS name is never loopback merely because it *begins* with ``127.`` —
+    only a literal address that ``ipaddress`` classifies as loopback counts
+    (127.0.0.0/8, ``::1``).
+    """
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _parse_connection(connection_id: str, raw: object, ctx: str) -> ConnectionSpec:
@@ -143,11 +169,18 @@ def _parse_connection(connection_id: str, raw: object, ctx: str) -> ConnectionSp
     if kind not in BACKEND_KINDS:
         raise SpecError(f"{ctx}: kind {kind!r} must be one of {sorted(BACKEND_KINDS)!r}")
     credential_env = _req_str(raw, "credential_env", ctx)
+    if not _ENV_NAME_RE.fullmatch(credential_env):
+        raise SpecError(
+            f"{ctx}: credential_env {credential_env!r} is not a usable "
+            "environment variable name (expected letters, digits, and "
+            "underscores, not starting with a digit)"
+        )
     base_url: str | None = None
     if "base_url" in raw:
         base_url = _req_str(raw, "base_url", ctx)
         if not (base_url.startswith("https://") or base_url.startswith("http://")):
             raise SpecError(f"{ctx}: base_url must start with http:// or https://")
+        _parse_base_url_host(base_url, ctx)
     if kind == BACKEND_KIND_OPENAI_COMPAT and base_url is None:
         raise SpecError(f"{ctx}: base_url is required for kind {kind!r}")
     allow_insecure_http = False
@@ -159,7 +192,7 @@ def _parse_connection(connection_id: str, raw: object, ctx: str) -> ConnectionSp
     if (
         base_url is not None
         and base_url.startswith("http://")
-        and not _is_loopback_host(base_url)
+        and not _is_loopback_host(_parse_base_url_host(base_url, ctx))
         and not allow_insecure_http
     ):
         raise SpecError(

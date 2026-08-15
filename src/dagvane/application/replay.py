@@ -21,6 +21,7 @@ from dagvane.domain.models import (
     NODE_FAILURE_REASONS,
     ROLE_JUDGE,
     RUN_TERMINAL_STATUSES,
+    USAGE_SOURCE_CEILING,
     USAGE_SOURCES,
     ArtifactWritten,
     Budget,
@@ -104,12 +105,20 @@ def _require_run_level(envelope: EventEnvelope) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _OpenDispatch:
+    """Reservation facts of one open dispatch, kept to validate its closure."""
+
+    reserved_tokens: int
+    reserved_cost_microusd: int
+
+
 @dataclass(slots=True)
 class _CausalState:
     """Fold-local correlation state; never part of the derived views."""
 
     expected_nodes: int = 0
-    open_dispatches: set[tuple[str, str, str]] = field(default_factory=set)
+    open_dispatches: dict[tuple[str, str, str], _OpenDispatch] = field(default_factory=dict)
     seen_operation_ids: set[str] = field(default_factory=set)
     seen_call_ids: set[str] = field(default_factory=set)
     artifact_hashes: set[str] = field(default_factory=set)
@@ -275,7 +284,10 @@ def fold_envelopes(
                     )
                 causal.seen_operation_ids.add(operation_id)
                 causal.seen_call_ids.add(call_id)
-                causal.open_dispatches.add((node_id, operation_id, call_id))
+                causal.open_dispatches[(node_id, operation_id, call_id)] = _OpenDispatch(
+                    reserved_tokens=payload.reserved_tokens,
+                    reserved_cost_microusd=payload.reserved_cost_microusd,
+                )
             elif isinstance(payload, ModelCompleted):
                 node_id, node = _node_for(view, envelope)
                 if node.status is not NodeStatus.RUNNING:
@@ -294,7 +306,7 @@ def fold_envelopes(
                         f"model.completed for {node_id!r} has no matching open "
                         f"dispatch (operation {operation_id!r}, call {call_id!r})"
                     )
-                causal.open_dispatches.remove(key)
+                del causal.open_dispatches[key]
                 if payload.output_sha256 not in causal.artifact_hashes:
                     raise ReplayError(
                         f"model.completed for {node_id!r} references unwritten "
@@ -330,12 +342,13 @@ def fold_envelopes(
                         "operation_id and call_id"
                     )
                 key = (node_id, operation_id, call_id)
-                if key not in causal.open_dispatches:
+                dispatch = causal.open_dispatches.get(key)
+                if dispatch is None:
                     raise ReplayError(
                         f"model.failed for {node_id!r} has no matching open "
                         f"dispatch (operation {operation_id!r}, call {call_id!r})"
                     )
-                causal.open_dispatches.remove(key)
+                del causal.open_dispatches[key]
                 if payload.reason not in BACKEND_DISPATCH_KINDS:
                     raise ReplayError(
                         f"model.failed for {node_id!r} has unknown reason "
@@ -353,6 +366,22 @@ def fold_envelopes(
                 ):
                     raise ReplayError(
                         f"model.failed for {node_id!r} carries negative billed amounts"
+                    )
+                if payload.usage_source == USAGE_SOURCE_CEILING and (
+                    payload.billed_input_tokens + payload.billed_output_tokens
+                    != dispatch.reserved_tokens
+                    or payload.billed_cost_microusd != dispatch.reserved_cost_microusd
+                ):
+                    # A ceiling-billed failure must commit exactly what its
+                    # dispatch reserved: anything else (notably zero) claims
+                    # conservative accounting it did not perform. ("mixed"
+                    # mingles provider actuals with per-component ceilings; the
+                    # component split is not journaled, so only ceiling closes
+                    # are checkable against the reservation.)
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} claims usage_source="
+                        f"\"ceiling\" but its billed amounts do not match the "
+                        f"dispatch reservation"
                     )
                 node.calls += 1
                 node.input_tokens += payload.billed_input_tokens

@@ -94,14 +94,16 @@ Per successful node attempt the executor emits, in order: `node.started` →
 (receipt, live backends only)] → `node.completed`; the judge additionally
 emits `decision.recorded` after completing. A **billed** live dispatch
 failure closes its dispatch with `model.failed` (billed amounts +
-`usage_source: provider|ceiling`) before `node.failed`; non-billed failures
-keep the G0 shape (released reservation, abandoned dispatch). `run.finished`
-totals equal Σ`model.completed` + Σ billed `model.failed`. `run.finished` is
-terminal-last — the journal refuses appends after it.
+`usage_source: provider|ceiling|mixed` — all components reported / none
+reported (exact reservation ceiling, replay-validated) / known components as
+reported with unknown ones at their ceiling) before `node.failed`; non-billed
+failures keep the G0 shape (released reservation, abandoned dispatch).
+`run.finished` totals equal Σ`model.completed` + Σ billed `model.failed`.
+`run.finished` is terminal-last — the journal refuses appends after it.
 
 Node failure reasons form a closed set:
 `dependency_failed`, `budget_rejected`, `budget_exceeded`, `backend_error`,
-`invalid_decision`, `unexpected_error`.
+`invalid_decision`, `unexpected_error`, `cancelled`.
 
 **Durable ordering per action:** serialize → journal append (fsync) → frame to
 the output sink → proceed. `events.jsonl` is authoritative for run state;
@@ -150,13 +152,16 @@ the dispatch closes with `model.failed(reason="protocol",
 usage_source="provider")`. More generally, live adapters raise
 `BackendDispatchError` with an explicit `billed` flag: non-billed failures
 (auth, rate limit, invalid request, provably pre-send connection errors)
-release their reservation exactly like G0; billed failures (timeout, 5xx,
+release their reservation exactly like G0; billed failures (read/write timeout, 5xx,
 2xx-bearing exceptions, ambiguous connection loss, missing usage) are
-committed — provider-reported actuals when available, otherwise the full
+committed — provider-reported actuals when available, per-component ceilings
+for unknown components (`usage_source="mixed"`), otherwise the full
 reservation ceiling — and journaled as `model.failed`. A provider that
 reports no usage cannot participate in a budgeted run (`usage_missing`,
-billed at ceiling). All journaled failure text is bounded far below the
-1 MiB frame limit.
+billed at ceiling). A cancellation delivered while a dispatch may have been
+sent commits the reservation ceiling and closes the dispatch with
+`model.failed(reason="cancelled")` before propagating. All journaled failure
+text is bounded far below the 1 MiB frame limit.
 
 ## 8. Failure taxonomy
 
@@ -167,6 +172,7 @@ billed at ceiling). All journaled failure text is bounded far below the
 | Budget rejection at admission | `budget.rejected` + `node.failed: budget_rejected`; the backend is never invoked. |
 | Budget overrun at commit | honest `model.completed`, then `node.failed: budget_exceeded`; run `failed`. |
 | Unexpected exception in a node | `node.failed: unexpected_error`; run `failed` with report. |
+| CancelledError delivered to a node (external teardown or a backend cancelling its worker) | any open dispatch is committed at the reservation ceiling (`model.failed: cancelled`), the node fails durably (`node.failed: cancelled`); engine-owned aborts (storage failure) propagate instead. |
 | Durable journal/artifact write failure | **abort without fabricated terminal state**: no `run.finished`, no report, `StorageError` propagates (exit 40). |
 | Output sink failure | streaming disabled, diagnostic on stderr; the run continues to its natural terminal state (the journal is authoritative). |
 

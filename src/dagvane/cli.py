@@ -39,6 +39,7 @@ from dagvane.domain.models import (
     RunStatus,
     SpecError,
 )
+from dagvane.domain.secrets import SecretScrubber
 from dagvane.ports.backend import ChatBackend
 from dagvane.protocol.documents import load_fixture_file, load_task_file
 from dagvane.protocol.frames import canonical_json_bytes
@@ -175,14 +176,19 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     return EXIT_COMPLETED
 
 
-def _build_live_backends(profile: ProfileSpec) -> dict[str, ChatBackend]:
+def _build_live_backends(
+    profile: ProfileSpec,
+) -> tuple[dict[str, ChatBackend], SecretScrubber]:
     """Construct one adapter per connection the council actually uses.
 
-    Credential values are read from the environment by *name* and handed only
-    to adapter constructors. ``ensure_ready`` surfaces a missing optional
-    dependency as a usage error before any run state exists.
+    Credential values are read from the environment by *name*, registered
+    ephemerally in one shared ``SecretScrubber`` (so every adapter scrubs
+    every configured credential — cross-provider reflections included), and
+    handed only to adapter constructors. ``ensure_ready`` surfaces a missing
+    optional dependency as a usage error before any run state exists.
     """
     backends: dict[str, ChatBackend] = {}
+    scrubber = SecretScrubber()
     for connection_id, connection in sorted(profile.used_connections().items()):
         value = os.environ.get(connection.credential_env)
         if not value:
@@ -191,21 +197,23 @@ def _build_live_backends(profile: ProfileSpec) -> dict[str, ChatBackend]:
                 f"variable {connection.credential_env!r}, which is not set"
             )
         # A credential with whitespace or non-printable bytes cannot form a
-        # legal HTTP header; transport errors would then repr() the value in
-        # escaped form, dodging exact-match redaction. Refuse it up front
-        # (never echoing the value).
+        # legal HTTP header; refuse it up front (never echoing the value).
+        # Everything in the admitted printable domain — quotes, backslashes,
+        # JSON-escapable characters — is covered by the shared scrubber.
         if not all(0x21 <= ord(ch) <= 0x7E for ch in value):
             raise SpecError(
                 f"the value of {connection.credential_env!r} contains whitespace "
                 "or non-printable characters and cannot be used as an HTTP "
                 "credential"
             )
+        scrubber.register(value)
         if connection.kind == BACKEND_KIND_ANTHROPIC:
             anthropic_backend = AnthropicBackend(
                 connection_id=connection_id,
                 api_key=value,
                 timeout_seconds=connection.timeout_seconds,
                 base_url=connection.base_url,
+                scrubber=scrubber,
             )
             anthropic_backend.ensure_ready()
             backends[connection_id] = anthropic_backend
@@ -218,10 +226,11 @@ def _build_live_backends(profile: ProfileSpec) -> dict[str, ChatBackend]:
                 api_key=value,
                 timeout_seconds=connection.timeout_seconds,
                 max_tokens_field=connection.max_tokens_field,
+                scrubber=scrubber,
             )
             compat_backend.ensure_ready()
             backends[connection_id] = compat_backend
-    return backends
+    return backends, scrubber
 
 
 def _cmd_council(args: argparse.Namespace) -> int:
@@ -250,9 +259,14 @@ def _cmd_council(args: argparse.Namespace) -> int:
         )
     else:
         profile = load_profile_file(args.profile)
-        backends = _build_live_backends(profile)
+        backends, scrubber = _build_live_backends(profile)
         result = run_council_live(
-            task=task, profile=profile, backends=backends, store=store, sink=sink
+            task=task,
+            profile=profile,
+            backends=backends,
+            store=store,
+            sink=sink,
+            scrubber=scrubber,
         )
     if result.sink_error is not None:
         _diag(

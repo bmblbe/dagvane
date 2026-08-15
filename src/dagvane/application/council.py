@@ -21,6 +21,7 @@ from graphlib import CycleError, TopologicalSorter
 from dagvane import __version__
 from dagvane.application.replay import fold_envelopes, rebuild_report
 from dagvane.domain.models import (
+    DISPATCH_KIND_CANCELLED,
     DISPATCH_KIND_PROTOCOL,
     ENTRY_KIND_PROPOSAL,
     ENTRY_KIND_REVIEW,
@@ -30,6 +31,7 @@ from dagvane.domain.models import (
     REASON_BACKEND_ERROR,
     REASON_BUDGET_EXCEEDED,
     REASON_BUDGET_REJECTED,
+    REASON_CANCELLED,
     REASON_DEPENDENCY_FAILED,
     REASON_INVALID_DECISION,
     REASON_UNEXPECTED_ERROR,
@@ -37,6 +39,7 @@ from dagvane.domain.models import (
     ROLE_PROPOSER,
     ROLE_REVIEWER,
     USAGE_SOURCE_CEILING,
+    USAGE_SOURCE_MIXED,
     USAGE_SOURCE_PROVIDER,
     ArtifactRef,
     ArtifactWritten,
@@ -62,6 +65,7 @@ from dagvane.domain.models import (
     NodeFailed,
     NodeStarted,
     NodeStatus,
+    PartialUsage,
     Plan,
     PlanNode,
     PlanValidationError,
@@ -78,6 +82,7 @@ from dagvane.domain.models import (
     estimate_tokens,
     payload_to_data,
 )
+from dagvane.domain.secrets import SecretScrubber
 from dagvane.ports.backend import ChatBackend, PreparedRequest
 from dagvane.ports.runtime import Clock, FixedClock, IdSource, SequentialIds, SystemClock, SystemIds
 from dagvane.ports.storage import ArtifactStore, RunStore
@@ -679,12 +684,14 @@ class OneShotModelWorker:
         artifacts: ArtifactStore,
         ids: IdSource,
         emit: Callable[..., None],
+        scrubber: SecretScrubber | None = None,
     ) -> None:
         self._backends = backends
         self._ledger = ledger
         self._artifacts = artifacts
         self._ids = ids
         self._emit = emit
+        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
 
     def _emit_receipt(
         self,
@@ -695,7 +702,7 @@ class OneShotModelWorker:
         receipt: InvocationReceipt,
         request_sha256: str,
         response_sha256: str | None,
-        usage: Usage | None,
+        usage: Usage | PartialUsage | None,
         cost_microusd: int | None,
         error_kind: str | None,
         usage_source: str | None,
@@ -790,25 +797,59 @@ class OneShotModelWorker:
             )
             raise
 
-        operation_id = self._ids.new_id("op")
-        call_id = self._ids.new_id("call")
-        self._emit(
-            ModelDispatched(
-                route_id=route.route_id,
-                model=route.model,
-                request_sha256=request_ref.sha256,
-                reserved_calls=reservation.calls,
-                reserved_tokens=reservation.tokens,
-                reserved_cost_microusd=reservation.cost_microusd,
-            ),
-            node_id=node.node_id,
-            attempt=attempt.index,
-            operation_id=operation_id,
-            call_id=call_id,
-        )
-        backend = self._backends[route.backend]
+        # Every step between a successful reservation and the backend await is
+        # inside this cleanup boundary: an id-allocation, serialization, frame
+        # size, or journal failure must not leak an in-flight reservation.
+        try:
+            operation_id = self._ids.new_id("op")
+            call_id = self._ids.new_id("call")
+            self._emit(
+                ModelDispatched(
+                    route_id=route.route_id,
+                    model=route.model,
+                    request_sha256=request_ref.sha256,
+                    reserved_calls=reservation.calls,
+                    reserved_tokens=reservation.tokens,
+                    reserved_cost_microusd=reservation.cost_microusd,
+                ),
+                node_id=node.node_id,
+                attempt=attempt.index,
+                operation_id=operation_id,
+                call_id=call_id,
+            )
+            backend = self._backends[route.backend]
+        except BaseException:
+            self._ledger.release(reservation)
+            raise
         try:
             result = await backend.complete(request)
+        except asyncio.CancelledError:
+            # The dispatch entered an ambiguous potentially-sent state: the
+            # provider may have received (and may bill) the request. Close the
+            # dispatch durably at the reservation ceiling before propagating —
+            # cancellation must never silently release a possibly billed call.
+            billed_usage = Usage(
+                input_tokens=estimated_input, output_tokens=route.max_output_tokens
+            )
+            self._ledger.commit(reservation, billed_usage, reserve_cost)
+            self._emit(
+                ModelFailed(
+                    reason=DISPATCH_KIND_CANCELLED,
+                    message=(
+                        "dispatch cancelled while the request may have reached "
+                        "the provider; committed at the reservation ceiling"
+                    ),
+                    billed_input_tokens=billed_usage.input_tokens,
+                    billed_output_tokens=billed_usage.output_tokens,
+                    billed_cost_microusd=reserve_cost,
+                    usage_source=USAGE_SOURCE_CEILING,
+                ),
+                node_id=node.node_id,
+                attempt=attempt.index,
+                operation_id=operation_id,
+                call_id=call_id,
+            )
+            raise
         except BackendDispatchError as exc:
             # A normalized live-dispatch failure. If the provider may have
             # billed the call, commit it honestly (provider-reported actuals
@@ -824,18 +865,35 @@ class OneShotModelWorker:
                         usage_source=None,
                     )
                 raise
-            if exc.usage is not None:
-                billed_usage = exc.usage
+            # Per-component accounting: every provider-known component is
+            # committed exactly as reported (never clamped, never replaced by
+            # a smaller local estimate); unknown components are committed at
+            # their reservation-ceiling component.
+            known_input = exc.usage.input_tokens if exc.usage is not None else None
+            known_output = exc.usage.output_tokens if exc.usage is not None else None
+            if known_input is not None and known_output is not None:
+                billed_usage = Usage(input_tokens=known_input, output_tokens=known_output)
                 usage_source = USAGE_SOURCE_PROVIDER
                 billed_cost = dispatch_cost_microusd(
                     billed_usage.input_tokens, billed_usage.output_tokens, route.pricing
                 )
-            else:
+            elif known_input is None and known_output is None:
                 billed_usage = Usage(
                     input_tokens=estimated_input, output_tokens=route.max_output_tokens
                 )
                 usage_source = USAGE_SOURCE_CEILING
                 billed_cost = reserve_cost
+            else:
+                billed_usage = Usage(
+                    input_tokens=known_input if known_input is not None else estimated_input,
+                    output_tokens=(
+                        known_output if known_output is not None else route.max_output_tokens
+                    ),
+                )
+                usage_source = USAGE_SOURCE_MIXED
+                billed_cost = dispatch_cost_microusd(
+                    billed_usage.input_tokens, billed_usage.output_tokens, route.pricing
+                )
             # Honest accounting first; a breach here is not raised separately —
             # the node already fails as backend_error and the run cannot
             # complete successfully with a failed node.
@@ -850,7 +908,7 @@ class OneShotModelWorker:
             self._emit(
                 ModelFailed(
                     reason=exc.kind,
-                    message=_bound_event_message(str(exc)),
+                    message=_bound_event_message(self._scrubber.scrub(str(exc))),
                     billed_input_tokens=billed_usage.input_tokens,
                     billed_output_tokens=billed_usage.output_tokens,
                     billed_cost_microusd=billed_cost,
@@ -995,6 +1053,7 @@ class RunExecutor:
         ids: IdSource,
         run_created: RunCreated,
         sink: FrameSink | None,
+        scrubber: SecretScrubber | None = None,
     ) -> None:
         self._run = run
         self._store = store
@@ -1003,6 +1062,7 @@ class RunExecutor:
         self._ids = ids
         self._run_created = run_created
         self._sink = sink
+        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
         self._ledger = BudgetLedger(run.budget)
         self._envelopes: list[EventEnvelope] = []
         self._events: dict[str, asyncio.Event] = {}
@@ -1011,6 +1071,11 @@ class RunExecutor:
         self._decision: Decision | None = None
         self._status = RunStatus.CREATED
         self._sink_error: str | None = None
+        # Dagvane-owned abort signal: set only when the engine itself is
+        # tearing the run down (durable storage failed). A CancelledError seen
+        # by a node without this flag is *not* an engine cancellation and must
+        # close the node durably instead of propagating.
+        self._engine_abort = False
 
     @property
     def sink_error(self) -> str | None:
@@ -1060,6 +1125,7 @@ class RunExecutor:
                 artifacts=artifacts,
                 ids=self._ids,
                 emit=self._emit,
+                scrubber=self._scrubber,
             )
             for node in self._run.plan.nodes:
                 self._events[node.node_id] = asyncio.Event()
@@ -1109,7 +1175,10 @@ class RunExecutor:
 
     def _fail_node(self, node: PlanNode, attempt: Attempt, reason: str, message: str) -> None:
         self._emit(
-            NodeFailed(reason=reason, message=_bound_event_message(message)),
+            NodeFailed(
+                reason=reason,
+                message=_bound_event_message(self._scrubber.scrub(message)),
+            ),
             node_id=node.node_id,
             attempt=attempt.index,
         )
@@ -1148,23 +1217,34 @@ class RunExecutor:
                 self._fail_node(node, attempt, REASON_BACKEND_ERROR, str(exc))
             except StorageError:
                 # Durable storage failed: the run must not fabricate terminal
-                # state on a store that just failed a write. Abort honestly.
+                # state on a store that just failed a write. Mark the engine-
+                # owned abort so sibling cancellations are distinguishable
+                # from backend-leaked ones, then abort honestly.
+                self._engine_abort = True
                 raise
             except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    # Genuine cooperative cancellation: propagate.
+                if self._engine_abort:
+                    # Dagvane itself is tearing the run down (storage failure):
+                    # propagate without touching the failed store.
                     raise
-                # A backend raised CancelledError without any cancel request
-                # (e.g. a leaked cancel scope). Swallowing it silently would
-                # end this task as "cancelled", leaving the node non-terminal
-                # in the journal under a completed run — fail it durably.
+                # Either an external (owner/loop) cancellation or a backend/SDK
+                # cancelling its own worker task. `Task.cancelling()` cannot
+                # distinguish the two, so both close the node durably — no
+                # terminal journal may contain a non-terminal cancelled node,
+                # and the dispatch itself was already committed and closed by
+                # the worker. External teardown still aborts the run through
+                # the parent task's own pending cancellation.
                 self._fail_node(
                     node,
                     attempt,
-                    REASON_UNEXPECTED_ERROR,
-                    "backend raised CancelledError without a cancellation request",
+                    REASON_CANCELLED,
+                    "cancellation delivered during node execution; any open "
+                    "dispatch was committed at the reservation ceiling",
                 )
+                current = asyncio.current_task()
+                if current is not None:
+                    while current.cancelling():
+                        current.uncancel()
             except Exception as exc:
                 # Unexpected worker/runtime failure: durable failed-node
                 # semantics instead of an abandoned, non-terminal run.
@@ -1271,6 +1351,16 @@ class CouncilRunResult:
     sink_error: str | None = None
 
 
+async def _aclose_backend(backend: ChatBackend) -> None:
+    """Duck-typed close: live adapters expose ``aclose``; fakes need not."""
+    aclose = getattr(backend, "aclose", None)
+    if not callable(aclose):
+        return
+    result = aclose()
+    if result is not None and hasattr(result, "__await__"):
+        await result
+
+
 def _execute_council(
     *,
     task: LoadedTask,
@@ -1285,6 +1375,7 @@ def _execute_council(
     determinism_doc: dict[str, object],
     store: RunStore,
     sink: FrameSink | None,
+    scrubber: SecretScrubber | None = None,
 ) -> CouncilRunResult:
     """Shared execution path for fixture and live councils."""
     run = Run(
@@ -1332,8 +1423,23 @@ def _execute_council(
             max_cost_microusd=budget.max_cost_microusd,
         ),
         sink=sink,
+        scrubber=scrubber,
     )
-    status, report_doc = asyncio.run(executor.execute())
+
+    async def _run_and_close() -> tuple[RunStatus, dict[str, object]]:
+        # Adapter transport resources are owned by this run: they are closed
+        # inside the same event loop that used them, before asyncio.run tears
+        # the loop down — never left to interpreter finalization.
+        try:
+            return await executor.execute()
+        finally:
+            for connection_id in sorted(backends):
+                try:
+                    await _aclose_backend(backends[connection_id])
+                except Exception:  # noqa: BLE001 — a close failure must not
+                    pass  # clobber the run's real outcome
+
+    status, report_doc = asyncio.run(_run_and_close())
     return CouncilRunResult(
         run_id=run_id, status=status, report_doc=report_doc, sink_error=executor.sink_error
     )
@@ -1387,12 +1493,16 @@ def run_council_live(
     sink: FrameSink | None = None,
     clock: Clock | None = None,
     ids: IdSource | None = None,
+    scrubber: SecretScrubber | None = None,
 ) -> CouncilRunResult:
     """Execute one live council run against profile-configured backends.
 
     ``backends`` maps connection ids to constructed adapters (the composition
-    root builds them; credential values never travel through this layer).
-    The manifest/`run.created` config hash is the profile file's sha256.
+    root builds them; credential values never travel through this layer —
+    ``scrubber`` is the shared registry those adapters already use, reused
+    here for the durable-event path). Adapters are closed by this call before
+    its event loop is torn down. The manifest/``run.created`` config hash is
+    the profile file's sha256.
     """
     plan, routes, budget = CouncilTemplate.build(task.spec, profile.role_routes())
     PlanValidator().validate(plan, routes)
@@ -1415,4 +1525,5 @@ def run_council_live(
         determinism_doc={"run_id_pinned": False, "clock": None, "ids_seed": None},
         store=store,
         sink=sink,
+        scrubber=scrubber,
     )

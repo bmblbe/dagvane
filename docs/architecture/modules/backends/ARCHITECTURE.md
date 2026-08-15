@@ -79,10 +79,24 @@ any run state is created.
    not report usage cannot participate in a budgeted run: the dispatch is
    normalized to `usage_missing`, billed at ceiling, and the node fails.
 5. Credential values never appear in events, artifacts, manifests, reports,
-   errors, or logs; every normalized error message is redacted (exact-value
-   replacement) before it leaves the adapter.
-6. Cancellation propagates (adapters never swallow `CancelledError`);
-   per-dispatch timeout comes from the connection config.
+   errors, or logs. One process-wide, in-memory `SecretScrubber`
+   (`domain/secrets.py`) holds every configured credential value ephemerally;
+   adapters scrub **all** provider-derived content — error text, successful
+   response content, model names, provider request ids — before it can be
+   truncated, persisted, or forwarded to another provider, and the executor
+   reuses the same scrubber on durable failure messages (defense in depth).
+   Scrubbing covers the raw value plus its `unicode_escape`, JSON-escaped,
+   and `repr()` renderings, and always runs before truncation.
+6. Cancellation propagates (adapters never swallow `CancelledError`), but a
+   dispatch that has entered the ambiguous potentially-sent state is closed
+   durably first: the worker commits the reservation ceiling and emits
+   `model.failed(reason="cancelled", usage_source="ceiling")` before
+   re-raising. Per-dispatch timeout comes from the connection config. The
+   executor distinguishes its own teardown (a Dagvane-owned abort flag set on
+   storage failure) from any other delivered `CancelledError`; the latter —
+   external or backend-leaked — fails the node durably
+   (`node.failed: cancelled`) so no terminal journal can contain a
+   non-terminal cancelled node.
 7. Wall-clock/entropy discipline: adapters measure latency through the
    runtime port's monotonic source, injected like Clock/IdSource.
 
@@ -90,10 +104,15 @@ any run state is created.
 
 - New payload `model.failed` `{reason, message, billed_input_tokens,
   billed_output_tokens, billed_cost_microusd, usage_source}` with
-  `usage_source ∈ {"provider","ceiling"}` (billed dispatches only; non-billed
-  failures emit no `model.failed`). It closes its open dispatch and
-  accumulates billed amounts into node/run totals; `run.finished` totals now
-  equal `Σ model.completed + Σ model.failed`. Every journaled failure message
+  `usage_source ∈ {"provider","ceiling","mixed"}` (billed dispatches only;
+  non-billed failures emit no `model.failed`): `provider` = every component
+  provider-reported; `ceiling` = no component known, the exact reservation
+  ceiling (replay validates the equality per dispatch); `mixed` = known
+  components committed exactly as reported (never clamped or replaced by a
+  local estimate), unknown components at their reservation-ceiling component.
+  It closes its open dispatch and accumulates billed amounts into node/run
+  totals; `run.finished` totals now equal
+  `Σ model.completed + Σ model.failed`. Every journaled failure message
   is bounded (adapters ≈2000 chars, engine defense-in-depth 4000) so a frame
   can never approach the 1 MiB protocol limit. Fixture-mode journals never
   contain `model.failed` (FakeBackend failures keep exact G0 semantics).
@@ -116,27 +135,46 @@ any run state is created.
 | HTTP 429 | `kind="rate_limit", billed=False` | released |
 | HTTP 5xx | `kind="api", billed=True` | ceiling |
 | exception carrying a 2xx/3xx status (delivered but unusable response) | `kind="protocol", billed=True` | ceiling |
-| timeout (incl. read/write/pool timeout after send) | `kind="timeout", billed=True` | ceiling |
-| provably pre-send failure (connect error/timeout, DNS, illegal URL/proxy) | `kind="connection", billed=False` | released |
+| read/write timeout after send | `kind="timeout", billed=True` | ceiling |
+| provably pre-send failure (connect error/timeout, **pool-acquisition timeout**, DNS, illegal URL/proxy, client construction) | `kind="connection"` or `kind="timeout"`, `billed=False` | released |
 | other transport/connection error (may have been sent) | `kind="connection", billed=True` | ceiling |
+| cancellation after the request may have been sent | worker closes the dispatch: `model.failed(reason="cancelled")` | exact reservation ceiling |
 | malformed response body | `kind="protocol", billed=True` | ceiling |
 | usage absent in response | `kind="usage_missing", billed=True` | ceiling |
-| provider reported usage on failure | same kinds, `usage` attached | actuals (`usage_source="provider"`) |
+| usage partially reported | `kind="usage_missing"` (or the response's failure kind), partial `usage` attached | known actuals + per-component ceiling (`usage_source="mixed"`) |
+| provider reported complete usage on failure | same kinds, `usage` attached | actuals (`usage_source="provider"`) |
+
 | 200 response whose reported output exceeds the route's `max_output_tokens` | live: billed protocol failure — actuals committed, output + receipt persisted, `model.failed(reason="protocol", usage_source="provider")`; fake (`receipt=None`): released (G0 fake-billing rule) | actuals / released |
 
+`PoolTimeout` is pre-send: the locked httpx/httpcore stack raises it while
+waiting to *acquire* a connection, before the request is physically sent
+(httpcore `AsyncConnectionPool.handle_async_request` awaits
+`wait_for_connection()` first). It is therefore never billed.
+
 All map to `node.failed: backend_error` at the node level, preserving the G0
-failure taxonomy.
+failure taxonomy — except cancellation, which maps to `node.failed:
+cancelled`.
 
 Additional adapter rules:
 
 - Credential values are validated at the composition root (printable ASCII
   only — a value that cannot form a legal HTTP header is refused before any
-  run state); adapter redaction also covers the escaped `repr()` form of the
-  key that transport libraries embed in error text.
+  run state) and registered ephemerally in the shared `SecretScrubber` (see
+  invariant 5): raw, `unicode_escape`, JSON-escaped, and `repr()` renderings
+  are all replaced, before any truncation.
+- Client construction happens inside the adapter's normalization boundary: a
+  constructor failure surfaces as a redacted, not-billed `connection` error,
+  never as a raw exception carrying credential material.
 - `ensure_ready()` verifies importability of the optional dependency only;
-  the transport client is constructed lazily inside the running event loop,
-  and `aclose()` releases it. An adapter instance is scoped to one event
-  loop / one run.
+  the transport client is constructed lazily inside the running event loop.
+  `run_council_live` owns adapter lifecycle: every backend's `aclose()` runs
+  inside the run's event loop before it is torn down. An adapter instance is
+  scoped to one event loop / one run.
+- Loopback classification for the cleartext-HTTP guard uses standard URL
+  parsing (`urllib.parse.urlsplit`) plus `ipaddress`: only the parsed
+  hostname counts (userinfo/query/fragment never affect it), and only
+  `localhost` or an actual loopback IP literal (127.0.0.0/8, `::1`)
+  qualifies. `credential_env` must be a usable environment-variable name.
 - Profile options: `max_tokens_field = "max_tokens" | "max_completion_tokens"`
   (openai_compat only; reasoning-era OpenAI endpoints reject `max_tokens`);
   `allow_insecure_http = true` is required to send a Bearer credential over

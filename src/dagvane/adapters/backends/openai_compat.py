@@ -27,9 +27,11 @@ from dagvane.domain.models import (
     DISPATCH_KIND_USAGE_MISSING,
     BackendDispatchError,
     InvocationReceipt,
+    PartialUsage,
     SpecError,
     Usage,
 )
+from dagvane.domain.secrets import SecretScrubber
 from dagvane.ports.backend import ChatResult, PreparedRequest
 from dagvane.ports.runtime import Monotonic, SystemMonotonic
 
@@ -55,6 +57,7 @@ class OpenAICompatBackend:
         max_tokens_field: str = "max_tokens",
         monotonic: Monotonic | None = None,
         client_factory: Callable[[], Any] | None = None,
+        scrubber: SecretScrubber | None = None,
     ) -> None:
         self._connection_id = connection_id
         self._base_url = base_url.rstrip("/")
@@ -64,6 +67,10 @@ class OpenAICompatBackend:
         self._monotonic: Monotonic = monotonic if monotonic is not None else SystemMonotonic()
         self._client_factory = client_factory
         self._client: Any | None = None
+        # The shared process-wide registry when provided (cross-provider
+        # scrubbing); this adapter's own credential is always registered.
+        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
+        self._scrubber.register(api_key)
 
     def ensure_ready(self) -> None:
         """Verify the optional dependency is importable — without constructing
@@ -108,7 +115,10 @@ class OpenAICompatBackend:
         return self._client
 
     def _redact(self, message: str) -> str:
-        return redact(message, (self._api_key,))
+        return redact(message, self._scrubber)
+
+    def _scrub_opt(self, value: str | None) -> str | None:
+        return self._scrubber.scrub(value) if value is not None else None
 
     def _receipt(self, started_ms: int, provider_request_id: str | None) -> InvocationReceipt:
         return InvocationReceipt(
@@ -119,17 +129,36 @@ class OpenAICompatBackend:
         )
 
     def _protocol_error(
-        self, message: str, started_ms: int, request_id: str | None = None
+        self,
+        message: str,
+        started_ms: int,
+        request_id: str | None = None,
+        usage: PartialUsage | None = None,
     ) -> BackendDispatchError:
         return BackendDispatchError(
             kind=DISPATCH_KIND_PROTOCOL,
             message=self._redact(message),
             billed=True,
+            usage=usage,
             receipt=self._receipt(started_ms, request_id),
         )
 
     async def complete(self, request: PreparedRequest) -> ChatResult:
-        client = self._get_client()
+        started_ms = self._monotonic.now_ms()
+        try:
+            # Client construction stays inside the normalization boundary: a
+            # constructor rejecting a header/base-URL configuration may echo
+            # credential material in its exception.
+            client = self._get_client()
+        except Exception as exc:
+            raise BackendDispatchError(
+                kind=DISPATCH_KIND_CONNECTION,
+                message=self._redact(
+                    f"client construction failed: {type(exc).__name__}: {exc}"
+                ),
+                billed=False,
+                receipt=self._receipt(started_ms, None),
+            ) from exc
         url = self._base_url + "/chat/completions"
         payload: dict[str, object] = {
             "model": request.model,
@@ -142,7 +171,6 @@ class OpenAICompatBackend:
             ],
             "stream": False,
         }
-        started_ms = self._monotonic.now_ms()
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 response = await client.post(url, json=payload)
@@ -176,7 +204,12 @@ class OpenAICompatBackend:
             raise self._protocol_error("response carries no HTTP status code", started_ms)
         if status != 200:
             body_text = getattr(response, "text", "")
-            snippet = body_text[:_BODY_SNIPPET_LIMIT] if isinstance(body_text, str) else ""
+            # Scrub the *full* body before truncation: a credential straddling
+            # the snippet boundary must not survive as an identifying prefix.
+            scrubbed = (
+                self._scrubber.scrub(body_text) if isinstance(body_text, str) else ""
+            )
+            snippet = scrubbed[:_BODY_SNIPPET_LIMIT]
             kind, billed = kind_for_status(status)
             raise BackendDispatchError(
                 kind=kind,
@@ -194,37 +227,51 @@ class OpenAICompatBackend:
         if not isinstance(body, dict):
             raise self._protocol_error("response body is not a JSON object", started_ms)
 
-        request_id = optional_str(body.get("id"))
+        request_id = self._scrub_opt(optional_str(body.get("id")))
         receipt = self._receipt(started_ms, request_id)
 
-        choices = body.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise self._protocol_error("response carries no choices", started_ms, request_id)
-        message_obj = choices[0].get("message")
-        if not isinstance(message_obj, dict):
-            raise self._protocol_error(
-                "response choice carries no message object", started_ms, request_id
-            )
-        content = message_obj.get("content")
-        text = content if isinstance(content, str) else ""
-
+        # Usage is read *before* validating choices: a billed 200 with a
+        # malformed choice must not lose the provider's reported actuals.
         usage_obj = body.get("usage")
         if not isinstance(usage_obj, dict):
             usage_obj = {}
         input_tokens = usable_token_count(usage_obj.get("prompt_tokens"))
         output_tokens = usable_token_count(usage_obj.get("completion_tokens"))
+        reported = PartialUsage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise self._protocol_error(
+                "response carries no choices", started_ms, request_id, usage=reported
+            )
+        message_obj = choices[0].get("message")
+        if not isinstance(message_obj, dict):
+            raise self._protocol_error(
+                "response choice carries no message object",
+                started_ms,
+                request_id,
+                usage=reported,
+            )
+        content = message_obj.get("content")
+        # Provider-derived content is scrubbed before it can be persisted or
+        # forwarded to another provider as council context.
+        text = self._scrubber.scrub(content) if isinstance(content, str) else ""
+
         if input_tokens is None or output_tokens is None:
+            # Preserve every reliable reported component: partial usage rides
+            # on the error so accounting never discards a known actual.
             raise BackendDispatchError(
                 kind=DISPATCH_KIND_USAGE_MISSING,
                 message=(
-                    "provider response carries no usable token usage; "
-                    "a hard-budget run cannot account this call"
+                    "provider response carries incomplete token usage; "
+                    "unknown components are accounted at the reservation ceiling"
                 ),
                 billed=True,
+                usage=reported,
                 receipt=receipt,
             )
 
-        model_name = optional_str(body.get("model"))
+        model_name = self._scrub_opt(optional_str(body.get("model")))
         return ChatResult(
             model=model_name if model_name is not None else request.model,
             text=text,

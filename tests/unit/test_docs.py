@@ -19,6 +19,8 @@ FIXTURE_NAMES = (
     "fixture_missing_model.json",
 )
 
+# "ANTHROPIC_API_KEY" left this list in G1: profiles legitimately name
+# credential environment variables in the documentation.
 LEGACY_MARKERS = (
     "dagvane init",
     "dagvane chat",
@@ -27,7 +29,6 @@ LEGACY_MARKERS = (
     "requirements.txt",
     "Python 3.9",
     "secrets.env",
-    "ANTHROPIC_API_KEY",
 )
 
 
@@ -50,7 +51,14 @@ def test_documented_fixtures_are_the_real_ones() -> None:
 
 def test_docs_describe_the_current_cli_and_python_floor() -> None:
     readme = _readme()
-    for command in ("plan council", "council", "runs show", "events", "--fixture"):
+    for command in (
+        "plan council",
+        "council",
+        "runs show",
+        "events",
+        "--fixture",
+        "--profile",
+    ):
         assert command in readme, f"README must document {command!r}"
     assert "3.11" in readme
     assert "3.11" in _development()

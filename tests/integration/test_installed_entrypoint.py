@@ -77,7 +77,7 @@ def test_installed_console_script_reports_version(installed_dagvane: Path) -> No
         [str(installed_dagvane), "--version"], capture_output=True, check=False
     )
     assert proc.returncode == 0
-    assert proc.stdout.strip() == b"dagvane 0.2.0.dev0"
+    assert proc.stdout.strip() == b"dagvane 0.3.0.dev0"
 
 
 def test_installed_console_script_runs_a_council(

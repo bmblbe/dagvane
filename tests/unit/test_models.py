@@ -6,6 +6,7 @@ import pytest
 
 from dagvane.domain.models import (
     EVENT_REGISTRY,
+    ModelFailed,
     NodeFailed,
     NodeStatus,
     ProtocolError,
@@ -129,3 +130,16 @@ def test_estimate_tokens() -> None:
     assert estimate_tokens("a") == 1
     assert estimate_tokens("abcd") == 1
     assert estimate_tokens("abcde") == 2
+
+
+def test_model_failed_round_trip() -> None:
+    payload = ModelFailed(
+        reason="timeout",
+        message="no response within 30s",
+        billed_input_tokens=100,
+        billed_output_tokens=512,
+        billed_cost_microusd=7980,
+        usage_source="ceiling",
+    )
+    data = payload_to_data(payload)
+    assert decode_payload("model.failed", data) == payload

@@ -10,9 +10,9 @@ This repository is the **greenfield implementation** adopted by
 prototype was retired; its history is preserved through the Git archive
 branch and tag described there.
 
-## Status: G0 — Deterministic Council Walking Skeleton
+## Status: G1 — Live Multi-provider Council
 
-The current milestone proves one complete vertical slice, end to end:
+Every run executes one complete vertical slice, end to end:
 
 ```
 TaskSpec ─► proposer A ─┐
@@ -20,22 +20,33 @@ TaskSpec ─► proposer A ─┐
 TaskSpec ─► proposer B ─┘
 ```
 
-- **Deterministic fake backends only.** Every model response comes from a
-  fixture file; there are no live providers, no network access, no tools, no
-  shell, no Git integration, and no GUI in G0 (`gui/` holds a placeholder).
+- **Two execution modes.** `--fixture` drives the deterministic fake backend
+  (byte-identical G0 behavior, used by the entire test suite); `--profile`
+  runs a live council across configured providers — a native Anthropic
+  backend plus one generic OpenAI-compatible backend (OpenAI, DeepSeek,
+  OpenRouter, Ollama, local servers).
 - **Durable, replayable runs.** Every run appends a gapless, append-only
   event journal; reports and decisions are derived views that replay
-  byte-identically from the journal.
-- **Hard budgets.** Multidimensional caps (calls, tokens, micro-USD cost) are
-  enforced at admission *and* as commit postconditions: actual usage is
-  recorded honestly, and a run can never complete successfully above its caps.
+  byte-identically from the journal. Live dispatches additionally persist
+  content-addressed invocation receipts (backend, route fingerprint,
+  request/response hashes, provider-reported usage, latency).
+- **Hard budgets, honest accounting.** Multidimensional caps (calls, tokens,
+  micro-USD cost) are enforced at admission *and* as commit postconditions.
+  A live dispatch failure that may have been billed (timeout, 5xx, lost
+  connection, missing usage) is committed at the reservation ceiling and
+  journaled as `model.failed` — never silently dropped. There are **no
+  automatic retries** in G1.
+- Still out of scope: tools, shell, Git integration, external agents, GUI
+  (`gui/` holds a placeholder). See `docs/implementation/MASTER_PLAN.md`.
 
 ## Requirements
 
 - Python **3.11 or newer**.
-- Nothing else: the engine has **zero runtime dependencies** (standard
-  library only). Development tools (`pytest`, `ruff`, `mypy`) come from the
-  `dev` extra.
+- Default install: **zero runtime dependencies** (standard library only).
+  Development tools (`pytest`, `ruff`, `mypy`) come from the `dev` extra;
+  live provider support comes from the optional `live` extra
+  (`pip install "dagvane[live]"`), imported lazily only when a profile
+  actually uses it.
 
 ## Installation
 
@@ -87,6 +98,60 @@ Diagnostics always go to stderr, never stdout.
 A fixture may pin `run_id`, a fixed `clock` (`start` + `step_ms`), and an
 `ids` seed. With all three pinned, repeated runs are **byte-identical** —
 journals, manifests, reports, decisions, and artifacts.
+
+## Live councils (`--profile`)
+
+A TOML profile defines backend connections, model routes with pinned pricing,
+and the council role mapping. Credentials are named by **environment
+variable**; their values never appear in any Dagvane file, event, or error.
+
+```toml
+profile_version = 1
+
+[connections.anthro]
+kind = "anthropic"
+credential_env = "ANTHROPIC_API_KEY"
+
+[connections.deepseek]
+kind = "openai_compat"
+base_url = "https://api.deepseek.com/v1"
+credential_env = "DEEPSEEK_API_KEY"
+timeout_seconds = 120
+
+[routes.strong]
+connection = "anthro"
+model = "claude-sonnet-5"
+max_output_tokens = 4096
+input_microusd_per_mtok = 3000000
+output_microusd_per_mtok = 15000000
+
+[routes.second]
+connection = "deepseek"
+model = "deepseek-chat"
+max_output_tokens = 4096
+input_microusd_per_mtok = 270000
+output_microusd_per_mtok = 1100000
+
+[council]
+proposer_a = "strong"
+proposer_b = "second"
+reviewer_a = "second"
+reviewer_b = "strong"
+judge = "strong"
+```
+
+```bash
+pip install "dagvane[live]"        # or: uv sync --extra dev --extra live
+export ANTHROPIC_API_KEY=...       # values stay in your environment
+export DEEPSEEK_API_KEY=...
+dagvane council my_task.json --profile my_profile.toml --output text
+```
+
+`--fixture` and `--profile` are mutually exclusive. A missing credential
+variable, an invalid profile, or a missing `live` extra is a usage error
+(exit 2) *before* any run state is created. Live API tests in this repository
+are opt-in only (`DAGVANE_LIVE_TESTS=1` + `DAGVANE_LIVE_PROFILE`), skipped by
+default, and the default test suite performs no network I/O.
 
 ## Durable run layout
 

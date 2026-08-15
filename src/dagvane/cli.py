@@ -1,26 +1,36 @@
 """Dagvane CLI: argparse surface, output sinks, exit-code mapping.
 
 This is the composition root: it wires concrete adapters (filesystem store,
-fake backend) into the application layer. Stdout carries only command output
-(NDJSON frames, canonical JSON documents, or rendered text); every diagnostic
-goes to stderr.
+fake or live backends) into the application layer. Credential values are read
+from the environment here and travel only into adapter constructors — never
+into documents, events, or errors. Stdout carries only command output (NDJSON
+frames, canonical JSON documents, or rendered text); every diagnostic goes to
+stderr.
 
-Exit codes (G0 subset of the Round 4 table): 0 completed · 2 usage/input
+Exit codes (G0/G1 subset of the Round 4 table): 0 completed · 2 usage/input
 error · 10 run finished failed · 40 internal error.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import traceback
 from collections.abc import Sequence
 from pathlib import Path
 
 from dagvane import __version__
+from dagvane.adapters.backends.anthropic import AnthropicBackend
 from dagvane.adapters.backends.fake import FakeBackend
+from dagvane.adapters.backends.openai_compat import OpenAICompatBackend
 from dagvane.adapters.storage.filesystem import FilesystemRunStore
-from dagvane.application.council import FrameSink, plan_council_doc, run_council
+from dagvane.application.council import (
+    FrameSink,
+    plan_council_doc,
+    run_council,
+    run_council_live,
+)
 from dagvane.application.replay import derived_status_doc, fold_frames
 from dagvane.domain.models import (
     DagvaneError,
@@ -29,8 +39,14 @@ from dagvane.domain.models import (
     RunStatus,
     SpecError,
 )
+from dagvane.ports.backend import ChatBackend
 from dagvane.protocol.documents import load_fixture_file, load_task_file
 from dagvane.protocol.frames import canonical_json_bytes
+from dagvane.protocol.profiles import (
+    BACKEND_KIND_ANTHROPIC,
+    ProfileSpec,
+    load_profile_file,
+)
 
 EXIT_COMPLETED = 0
 EXIT_USAGE = 2
@@ -55,7 +71,10 @@ def _nonnegative_int(value: str) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dagvane",
-        description="Dagvane engine (G0): deterministic fake-backend council runs.",
+        description=(
+            "Dagvane engine: deterministic fixture councils and "
+            "live multi-provider councils."
+        ),
     )
     parser.add_argument(
         "--version", action="version", version=f"dagvane {__version__}"
@@ -75,11 +94,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     council = commands.add_parser("council", help="execute a council run")
     council.add_argument("task_file", type=Path)
-    council.add_argument(
+    council_source = council.add_mutually_exclusive_group(required=True)
+    council_source.add_argument(
         "--fixture",
         type=Path,
-        required=True,
-        help="fixture file driving the deterministic fake backend (required in G0)",
+        help="fixture file driving the deterministic fake backend",
+    )
+    council_source.add_argument(
+        "--profile",
+        type=Path,
+        help="TOML live-council profile (connections, routes, role mapping)",
     )
     council.add_argument("--output", choices=["text", "json", "ndjson"], default="text")
 
@@ -151,11 +175,47 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     return EXIT_COMPLETED
 
 
+def _build_live_backends(profile: ProfileSpec) -> dict[str, ChatBackend]:
+    """Construct one adapter per connection the council actually uses.
+
+    Credential values are read from the environment by *name* and handed only
+    to adapter constructors. ``ensure_ready`` surfaces a missing optional
+    dependency as a usage error before any run state exists.
+    """
+    backends: dict[str, ChatBackend] = {}
+    for connection_id, connection in sorted(profile.used_connections().items()):
+        value = os.environ.get(connection.credential_env)
+        if not value:
+            raise SpecError(
+                f"connection {connection_id!r} requires the credential environment "
+                f"variable {connection.credential_env!r}, which is not set"
+            )
+        if connection.kind == BACKEND_KIND_ANTHROPIC:
+            anthropic_backend = AnthropicBackend(
+                connection_id=connection_id,
+                api_key=value,
+                timeout_seconds=connection.timeout_seconds,
+                base_url=connection.base_url,
+            )
+            anthropic_backend.ensure_ready()
+            backends[connection_id] = anthropic_backend
+        else:
+            base_url = connection.base_url
+            assert base_url is not None  # enforced by profile validation
+            compat_backend = OpenAICompatBackend(
+                connection_id=connection_id,
+                base_url=base_url,
+                api_key=value,
+                timeout_seconds=connection.timeout_seconds,
+            )
+            compat_backend.ensure_ready()
+            backends[connection_id] = compat_backend
+    return backends
+
+
 def _cmd_council(args: argparse.Namespace) -> int:
     task = load_task_file(args.task_file)
-    fixture = load_fixture_file(args.fixture)
     store = FilesystemRunStore(Path.cwd())
-    backend = FakeBackend(fixture.responses)
 
     sink: FrameSink | None
     if args.output == "ndjson":
@@ -171,7 +231,18 @@ def _cmd_council(args: argparse.Namespace) -> int:
     else:
         sink = None
 
-    result = run_council(task=task, fixture=fixture, store=store, backend=backend, sink=sink)
+    if args.fixture is not None:
+        fixture = load_fixture_file(args.fixture)
+        backend = FakeBackend(fixture.responses)
+        result = run_council(
+            task=task, fixture=fixture, store=store, backend=backend, sink=sink
+        )
+    else:
+        profile = load_profile_file(args.profile)
+        backends = _build_live_backends(profile)
+        result = run_council_live(
+            task=task, profile=profile, backends=backends, store=store, sink=sink
+        )
     if result.sink_error is not None:
         _diag(
             "output stream failed mid-run; the journal is authoritative: "

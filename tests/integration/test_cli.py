@@ -32,13 +32,13 @@ def test_help_and_import_need_no_provider_sdk(tmp_path: Path) -> None:
         check=False,
     )
     assert check.returncode == 0
-    assert b"0.2.0.dev0" in check.stdout
+    assert b"0.3.0.dev0" in check.stdout
 
 
 def test_version(tmp_path: Path) -> None:
     proc = run_cli(["--version"], tmp_path)
     assert proc.returncode == 0
-    assert proc.stdout.strip() == b"dagvane 0.2.0.dev0"
+    assert proc.stdout.strip() == b"dagvane 0.3.0.dev0"
 
 
 def test_missing_arguments_is_a_usage_error(tmp_path: Path) -> None:

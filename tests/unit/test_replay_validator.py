@@ -18,6 +18,7 @@ from dagvane.domain.models import (
     EventPayload,
     ModelCompleted,
     ModelDispatched,
+    ModelFailed,
     NodeCompleted,
     NodeFailed,
     NodeStarted,
@@ -494,4 +495,126 @@ def test_first_event_must_be_run_created() -> None:
     journal = Journal()
     journal.add(NodeStarted(role="proposer", route_id="fake/x"), node_id="n1")
     with pytest.raises(ReplayError, match="first event must be run.created"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+# ---------------------------------------------------------------------------
+# model.failed (G1): billed dispatch failures close their dispatch and count
+# ---------------------------------------------------------------------------
+
+
+def model_failed(
+    reason: str = "timeout",
+    *,
+    billed_input: int = 10,
+    billed_output: int = 100,
+    billed_cost: int = 50,
+    usage_source: str = "ceiling",
+) -> ModelFailed:
+    return ModelFailed(
+        reason=reason,
+        message="normalized failure",
+        billed_input_tokens=billed_input,
+        billed_output_tokens=billed_output,
+        billed_cost_microusd=billed_cost,
+        usage_source=usage_source,
+    )
+
+
+def billed_failure_journal(payload: ModelFailed) -> Journal:
+    journal = Journal()
+    journal.add(created(1))
+    journal.add(NodeStarted(role="proposer", route_id="live/x"), node_id="n1")
+    journal.add(artifact(REQ_SHA), node_id="n1")
+    journal.add(dispatched(), node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(payload, node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(NodeFailed(reason="backend_error", message="x"), node_id="n1")
+    return journal
+
+
+def test_model_failed_closes_dispatch_and_bills_totals() -> None:
+    journal = billed_failure_journal(model_failed())
+    journal.add(
+        finished(
+            "failed",
+            reason="n1: backend_error",
+            calls=1,
+            input_tokens=10,
+            output_tokens=100,
+            cost_microusd=50,
+        )
+    )
+    view = fold_envelopes(journal.envelopes)
+    assert view.status is RunStatus.FAILED
+    assert view.total_calls == 1
+    assert view.total_cost_microusd == 50
+    node = view.nodes["n1"]
+    assert node.status is NodeStatus.FAILED
+    assert node.input_tokens == 10
+    assert node.output_tokens == 100
+
+
+def test_run_finished_totals_must_include_billed_failures() -> None:
+    journal = billed_failure_journal(model_failed())
+    journal.add(
+        finished(
+            "failed",
+            reason="n1: backend_error",
+            calls=0,
+            input_tokens=0,
+            output_tokens=0,
+            cost_microusd=0,
+        )
+    )
+    with pytest.raises(ReplayError, match="totals do not match"):
+        fold_envelopes(journal.envelopes)
+
+
+def test_model_failed_requires_an_open_dispatch() -> None:
+    journal = Journal()
+    journal.add(created(1))
+    journal.add(NodeStarted(role="proposer", route_id="live/x"), node_id="n1")
+    journal.add(model_failed(), node_id="n1", operation_id="op-1", call_id="call-1")
+    with pytest.raises(ReplayError, match="no matching open dispatch"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_model_failed_requires_operation_and_call_ids() -> None:
+    journal = Journal()
+    journal.add(created(1))
+    journal.add(NodeStarted(role="proposer", route_id="live/x"), node_id="n1")
+    journal.add(artifact(REQ_SHA), node_id="n1")
+    journal.add(dispatched(), node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(model_failed(), node_id="n1")
+    with pytest.raises(ReplayError, match="requires operation_id and call_id"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_model_failed_rejects_unknown_reason() -> None:
+    journal = billed_failure_journal(model_failed(reason="gremlins"))
+    with pytest.raises(ReplayError, match="unknown reason"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_model_failed_rejects_unknown_usage_source() -> None:
+    journal = billed_failure_journal(model_failed(usage_source="guesswork"))
+    with pytest.raises(ReplayError, match="unknown usage_source"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_model_failed_rejects_negative_billed_amounts() -> None:
+    journal = billed_failure_journal(model_failed(billed_cost=-1))
+    with pytest.raises(ReplayError, match="negative billed"):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_node_completed_after_model_failed_is_rejected() -> None:
+    journal = Journal()
+    journal.add(created(1))
+    journal.add(NodeStarted(role="proposer", route_id="live/x"), node_id="n1")
+    journal.add(artifact(REQ_SHA), node_id="n1")
+    journal.add(dispatched(), node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(model_failed(), node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(NodeCompleted(output_sha256=OUT_SHA), node_id="n1")
+    with pytest.raises(ReplayError):
         fold_envelopes(journal.envelopes, require_terminal=False)

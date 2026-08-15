@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dagvane"
-description = "Dagvane engine — greenfield walking skeleton (G0): deterministic fake-backend council runs."
+description = "Dagvane engine: durable, replayable, budget-capped multi-model council runs."
 requires-python = ">=3.11"
 dependencies = []
 dynamic = ["version"]

@@ -4,8 +4,9 @@
 
 Make `ModelRoute.backend` functional: resolve every plan node's route to a
 concrete `ChatBackend` and execute a live, text-only, budget-capped council
-across multiple providers — while the deterministic FakeBackend path stays
-byte-identical to G0.
+across multiple providers — while the deterministic FakeBackend path keeps
+the exact G0 event shape and byte-reproducibility (only the recorded
+`engine_version` advances).
 
 ## Inputs / outputs
 
@@ -63,7 +64,8 @@ any run state is created.
 
 ## Invariants (binding)
 
-1. All G0 invariants hold; fixture mode is byte-identical to G0.
+1. All G0 invariants hold; fixture mode keeps the exact G0 event shape and
+   repeated-run byte-identity (only `engine_version` advances).
 2. Default install: zero runtime deps, zero network; provider SDKs live in
    the optional `live` extra, imported lazily inside adapters (the import
    contract test carries a per-file allowlist and a `sys.modules` laziness

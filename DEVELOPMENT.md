@@ -1,14 +1,17 @@
 # Dagvane — Developer Guide
 
-This guide is for developers working **on** the Dagvane engine (the greenfield
-G0 implementation). The product-facing overview lives in `README.md`; the
+This guide is for developers working **on** the Dagvane engine. The
+product-facing overview lives in `README.md`; the
 accepted architecture and research live under `docs/architecture/` and are
 **never modified by implementation work**.
 
 ## 1. Ground rules
 
-- Python **3.11+**, standard library only at runtime. No vendor SDKs, no HTTP
-  clients, no Pydantic — enforced mechanically by `tests/contract/test_imports.py`.
+- Python **3.11+**, standard library only for the default install. Vendor
+  SDKs (`anthropic`, `httpx`) exist solely in the optional `live` extra and
+  may be imported **lazily, only** inside their designated adapter modules —
+  enforced mechanically by `tests/contract/test_imports.py` (per-file
+  allowlist plus a runtime laziness proof). No Pydantic anywhere.
 - Wall-clock time and identifier entropy may enter **only** through
   `src/dagvane/ports/runtime.py`; everything else receives clocks and id
   sources by injection. This is what makes runs reproducible.
@@ -37,14 +40,19 @@ src/dagvane/
   domain/models.py        # frozen dataclasses, run/node state machines,
                           # closed event registry, closed failure reasons
   ports/backend.py        # ChatBackend protocol, PreparedRequest, ChatResult
-  ports/runtime.py        # Clock and IdSource ports (+ System/Fixed impls)
+  ports/runtime.py        # Clock, IdSource, Monotonic ports (+ System/Fixed impls)
   ports/storage.py        # RunStore, EventJournal, ArtifactStore protocols
   protocol/frames.py      # canonical JSON + NDJSON frame codec (strict decode)
   protocol/documents.py   # task/fixture/decision boundary validation, doc builders
+  protocol/profiles.py    # strict TOML live-profile validation (G1)
   adapters/backends/fake.py     # deterministic fixture-driven backend (tests/CI only)
+  adapters/backends/anthropic.py     # native Anthropic adapter (lazy SDK, G1)
+  adapters/backends/openai_compat.py # generic OpenAI-compatible adapter (lazy httpx, G1)
+  adapters/backends/common.py        # redaction + error-normalization helpers
   adapters/storage/filesystem.py # run dirs, CAS artifacts, gapless fsync'd journal
   application/council.py  # CouncilTemplate, PlanValidator, BudgetLedger,
-                          # OneShotModelWorker, RunExecutor, entry points
+                          # OneShotModelWorker, RunExecutor, backend registry,
+                          # entry points (fixture + live)
   application/replay.py   # fail-closed causal fold + derived views (RunReport)
   cli.py                  # argparse surface, sinks, exit-code mapping
 tests/
@@ -76,13 +84,19 @@ by the single journal writer. The payload registry is closed:
 
 ```
 run.created  node.started  artifact.written  model.dispatched  model.completed
-node.completed  node.failed  budget.rejected  decision.recorded  run.finished
+model.failed  node.completed  node.failed  budget.rejected  decision.recorded
+run.finished
 ```
 
 Per successful node attempt the executor emits, in order: `node.started` →
 `artifact.written` (request snapshot) → `model.dispatched` →
-`artifact.written` (output) → `model.completed` → `node.completed`; the judge
-additionally emits `decision.recorded` after completing. `run.finished` is
+`artifact.written` (output) → `model.completed` → [`artifact.written`
+(receipt, live backends only)] → `node.completed`; the judge additionally
+emits `decision.recorded` after completing. A **billed** live dispatch
+failure closes its dispatch with `model.failed` (billed amounts +
+`usage_source: provider|ceiling`) before `node.failed`; non-billed failures
+keep the G0 shape (released reservation, abandoned dispatch). `run.finished`
+totals equal Σ`model.completed` + Σ billed `model.failed`. `run.finished` is
 terminal-last — the journal refuses appends after it.
 
 Node failure reasons form a closed set:
@@ -128,9 +142,14 @@ dependency-failed nodes legally go `pending → failed` without ever starting.
    above its configured caps, and replay independently rejects such journals.
 
 A backend claiming more output tokens than the route's `max_output_tokens`
-violates its contract and is normalized to a `backend_error` (billed at zero
-under the G0 fake-billing rule; live G1 backends will bill failures at the
-ceiling).
+violates its contract and is normalized to a `backend_error` billed at zero.
+Live adapters raise `BackendDispatchError` with an explicit `billed` flag:
+non-billed failures (auth, rate limit, invalid request) release their
+reservation exactly like G0; billed failures (timeout, 5xx, lost connection,
+missing usage) are committed — provider-reported actuals when available,
+otherwise the full reservation ceiling — and journaled as `model.failed`.
+A provider that reports no usage cannot participate in a budgeted run
+(`usage_missing`, billed at ceiling).
 
 ## 8. Failure taxonomy
 
@@ -172,25 +191,31 @@ Shared fixtures live in `tests/fixtures/`: `task_basic.json`,
 `fixture_missing_model.json`. A session-scoped happy run (`r-happy-0001`) is
 reused by read-only tests (`tests/conftest.py`).
 
-When adding tests, never call a real model API; fake backends only. New event
+When adding tests, never call a real model API; fake backends and injected
+fake clients only (`tests/unit/test_backend_adapters.py`,
+`tests/integration/test_live_council.py`). The only exception is the opt-in
+live smoke suite under `tests/live/`, which is skipped unless
+`DAGVANE_LIVE_TESTS=1`. New event
 types or payload fields are a versioned-contract change — extend the closed
 registry, the replay validator, and the negative matrices together.
 
-## 10. Scope boundary (G0 → G1)
+## 10. Scope boundary (G1 → G2)
 
-G0 deliberately contains **no** live providers, network access, shell/tools,
-Git/worktree management, external-agent adapters, dynamic Strategist, RAG,
-MCP/A2A, cost routing, or Qt implementation. Do not add them casually; each
-arrives at its own milestone in
+G1 deliberately contains **no** tools, shell, model-initiated file writes,
+Git/worktree management, external-agent adapters, automatic retries, dynamic
+Strategist, RAG, MCP/A2A, cost routing, or Qt implementation. Do not add them
+casually; each arrives at its own milestone in
 `docs/implementation/MASTER_PLAN.md`.
 
-Known, intentional G1 seams:
+Known, intentional G2 seams:
 
-- `ModelRoute.backend` is recorded in manifests but not consulted at
-  execution time — the executor receives one backend instance. Mixed-provider
-  routing needs a routing boundary in G1.
+- LogicalConversation / ProviderSession / full ContextSnapshot schema and
+  fresh/resume/reconstruct adapter semantics (ADR-0001); in G1 the request
+  artifact plus the invocation receipt are the provenance record.
 - Retry/repair policies (e.g. one-repair for invalid judge output), richer
-  exit-code taxonomy, and cancellation/resume semantics.
+  exit-code taxonomy (blocked/cancelled), and park/resume runtime semantics.
+- `RunCreated.fixture_sha256` carries the fixture *or* profile hash; it is
+  renamed at the next envelope version bump.
 
 ## 11. Owner decisions currently open
 

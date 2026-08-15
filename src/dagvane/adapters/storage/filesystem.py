@@ -3,8 +3,10 @@
 Durability discipline (Round 4 §10): documents and artifacts are written as
 tmp file → fsync → atomic rename → fsync of the containing directory; the
 event journal is append + flush + fsync per event, with gapless ``seq``
-assigned by the single writer. ``events.jsonl`` is authoritative; manifest,
-decision, and report are derived views.
+assigned by the single writer. ``events.jsonl`` is authoritative for run
+state; decision and report are views derived from it, while ``manifest.json``
+is the sealed pre-run configuration record referenced by hash from
+``run.created``.
 """
 
 from __future__ import annotations

@@ -264,8 +264,17 @@ _DECISION_KEYS = frozenset({"decision_version", "winner", "rationale"})
 
 def parse_decision(text: str, allowed_winners: frozenset[str]) -> Decision:
     ctx = "judge decision"
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        obj: dict[str, object] = {}
+        for key, value in pairs:
+            if key in obj:
+                raise SpecError(f"{ctx} has duplicate key {key!r}")
+            obj[key] = value
+        return obj
+
     try:
-        obj = json.loads(text)
+        obj = json.loads(text, object_pairs_hook=reject_duplicate_keys)
     except ValueError as exc:
         raise SpecError(f"{ctx} is not valid JSON: {exc}") from exc
     if not isinstance(obj, dict):

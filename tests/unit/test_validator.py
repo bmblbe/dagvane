@@ -158,3 +158,131 @@ def test_council_requires_two_proposers_and_one_judge() -> None:
     no_judge = dataclasses.replace(plan, nodes=tuple(filter(strip_judge, plan.nodes)))
     with pytest.raises(PlanValidationError, match="exactly one judge"):
         PlanValidator().validate(no_judge, routes)
+
+
+def test_third_proposer_rejected() -> None:
+    plan, routes, _ = _template()
+    extra = dataclasses.replace(
+        next(n for n in plan.nodes if n.node_id == "proposer-a"),
+        node_id="proposer-c",
+        identity="C",
+        route_id="fake/proposer-a",
+    )
+    widened = dataclasses.replace(plan, nodes=(*plan.nodes, extra))
+    with pytest.raises(PlanValidationError, match="exactly two proposers"):
+        PlanValidator().validate(widened, routes)
+
+
+def test_missing_reviewer_rejected() -> None:
+    plan, routes, _ = _template()
+    judge = next(n for n in plan.nodes if n.node_id == "judge")
+    pruned_manifest = InputManifest(
+        entries=tuple(e for e in judge.input_manifest.entries if e.producer != "review-by-b")
+    )
+    nodes = tuple(
+        dataclasses.replace(n, depends_on=("review-by-a",), input_manifest=pruned_manifest)
+        if n.node_id == "judge"
+        else n
+        for n in plan.nodes
+        if n.node_id != "review-by-b"
+    )
+    one_reviewer = dataclasses.replace(plan, nodes=nodes)
+    with pytest.raises(PlanValidationError, match="exactly two reviewers"):
+        PlanValidator().validate(one_reviewer, routes)
+
+
+def test_reviewer_identity_outside_proposer_identities_rejected() -> None:
+    plan, routes, _ = _template()
+    mutated = _replace_node(plan, "review-by-a", identity="C")
+    with pytest.raises(PlanValidationError, match="reviewer identities"):
+        PlanValidator().validate(mutated, routes)
+
+
+def test_empty_proposer_context_rejected() -> None:
+    plan, routes, _ = _template()
+    mutated = _replace_node(plan, "proposer-a", input_manifest=InputManifest(entries=()))
+    with pytest.raises(PlanValidationError, match="exactly one task"):
+        PlanValidator().validate(mutated, routes)
+
+
+def test_duplicated_task_entries_in_proposer_rejected() -> None:
+    plan, routes, _ = _template()
+    doubled = InputManifest(
+        entries=(
+            ManifestEntry(kind="task", label="task", producer=None),
+            ManifestEntry(kind="task", label="task-again", producer=None),
+        )
+    )
+    mutated = _replace_node(plan, "proposer-a", input_manifest=doubled)
+    with pytest.raises(PlanValidationError, match="exactly one task"):
+        PlanValidator().validate(mutated, routes)
+
+
+def test_reviewer_seeing_both_proposals_rejected() -> None:
+    plan, routes, _ = _template()
+    both = InputManifest(
+        entries=(
+            ManifestEntry(kind="task", label="task", producer=None),
+            ManifestEntry(kind="proposal", label="candidate-1", producer="proposer-a"),
+            ManifestEntry(kind="proposal", label="candidate-2", producer="proposer-b"),
+        )
+    )
+    mutated = _replace_node(plan, "review-by-a", input_manifest=both)
+    with pytest.raises(PlanValidationError, match="exactly the task plus one"):
+        PlanValidator().validate(mutated, routes)
+
+
+def test_judge_missing_a_review_entry_rejected() -> None:
+    plan, routes, _ = _template()
+    judge = next(n for n in plan.nodes if n.node_id == "judge")
+    pruned = InputManifest(
+        entries=tuple(e for e in judge.input_manifest.entries if e.producer != "review-by-b")
+    )
+    mutated = _replace_node(plan, "judge", input_manifest=pruned)
+    with pytest.raises(PlanValidationError, match="every proposal, and every review"):
+        PlanValidator().validate(mutated, routes)
+
+
+def test_conflicting_proposal_labels_across_manifests_rejected() -> None:
+    plan, routes, _ = _template()
+    relabeled = InputManifest(
+        entries=(
+            ManifestEntry(kind="task", label="task", producer=None),
+            # review-by-b reviews proposer-a's proposal but under the label the
+            # rest of the council uses for proposer-b's proposal.
+            ManifestEntry(kind="proposal", label="candidate-2", producer="proposer-a"),
+        )
+    )
+    mutated = _replace_node(plan, "review-by-b", input_manifest=relabeled)
+    with pytest.raises(PlanValidationError, match="conflicting producers"):
+        PlanValidator().validate(mutated, routes)
+
+
+def test_extra_anonymization_alias_rejected() -> None:
+    plan, routes, _ = _template()
+    ghosted = dataclasses.replace(
+        plan,
+        anonymization={**plan.anonymization, "candidate-ghost": "proposer-a"},
+    )
+    with pytest.raises(PlanValidationError, match="exactly the proposal labels in use"):
+        PlanValidator().validate(ghosted, routes)
+
+
+def test_missing_anonymization_alias_rejected() -> None:
+    plan, routes, _ = _template()
+    partial = dataclasses.replace(plan, anonymization={"candidate-1": "proposer-a"})
+    with pytest.raises(PlanValidationError, match="exactly the proposal labels in use"):
+        PlanValidator().validate(partial, routes)
+
+
+def test_sealed_mapping_is_deeply_immutable() -> None:
+    plan, _, _ = _template()
+    mapping = plan.anonymization
+    with pytest.raises(TypeError):
+        mapping["candidate-ghost"] = "proposer-a"  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        plan.anonymization = {}  # type: ignore[misc]
+    # replace() reseals: the new plan's mapping is again an immutable view.
+    replaced = dataclasses.replace(plan, anonymization=dict(plan.anonymization))
+    with pytest.raises(TypeError):
+        replaced.anonymization["candidate-ghost"] = "proposer-a"  # type: ignore[index]

@@ -27,9 +27,11 @@ from dagvane.domain.models import (
     ENTRY_KINDS,
     ENVELOPE_VERSION,
     REASON_BACKEND_ERROR,
+    REASON_BUDGET_EXCEEDED,
     REASON_BUDGET_REJECTED,
     REASON_DEPENDENCY_FAILED,
     REASON_INVALID_DECISION,
+    REASON_UNEXPECTED_ERROR,
     ROLE_JUDGE,
     ROLE_PROPOSER,
     ROLE_REVIEWER,
@@ -38,6 +40,7 @@ from dagvane.domain.models import (
     Attempt,
     BackendError,
     Budget,
+    BudgetExceededError,
     BudgetRejected,
     BudgetRejectedError,
     Decision,
@@ -62,6 +65,7 @@ from dagvane.domain.models import (
     RunFinished,
     RunStatus,
     SpecError,
+    StorageError,
     TaskSpec,
     Usage,
     advance_run_status,
@@ -261,75 +265,136 @@ class PlanValidator:
             raise PlanValidationError(f"plan has a dependency cycle: {exc}") from exc
 
         ancestors = {node_id: self._ancestors(node_id, nodes) for node_id in nodes}
-        proposers = [n.node_id for n in plan.nodes if n.role == ROLE_PROPOSER]
-        reviewers = [n.node_id for n in plan.nodes if n.role == ROLE_REVIEWER]
-        judges = [n.node_id for n in plan.nodes if n.role == ROLE_JUDGE]
-        if len(proposers) < 2:
-            raise PlanValidationError("a council needs at least two proposers")
+        proposers = [n for n in plan.nodes if n.role == ROLE_PROPOSER]
+        reviewers = [n for n in plan.nodes if n.role == ROLE_REVIEWER]
+        judges = [n for n in plan.nodes if n.role == ROLE_JUDGE]
+        # Exact council-v1 topology: two proposers, two opposite reviewers, one judge.
+        if len(proposers) != 2:
+            raise PlanValidationError(
+                f"council-v1 requires exactly two proposers, found {len(proposers)}"
+            )
+        if len(reviewers) != 2:
+            raise PlanValidationError(
+                f"council-v1 requires exactly two reviewers, found {len(reviewers)}"
+            )
         if len(judges) != 1:
-            raise PlanValidationError("a council needs exactly one judge")
+            raise PlanValidationError(
+                f"council-v1 requires exactly one judge, found {len(judges)}"
+            )
+        proposer_identities = {n.identity for n in proposers}
+        if len(proposer_identities) != 2:
+            raise PlanValidationError("proposers must carry two distinct identities")
+        if {n.identity for n in reviewers} != proposer_identities:
+            raise PlanValidationError(
+                "reviewer identities must be exactly the proposer identities "
+                "(one opposite reviewer per proposer)"
+            )
 
         for node in plan.nodes:
             self._validate_manifest(node, nodes, ancestors[node.node_id])
+            entries = node.input_manifest.entries
             if node.role == ROLE_PROPOSER:
                 # Structural anti-anchoring: proposer context is the task alone.
-                for entry in node.input_manifest.entries:
+                for entry in entries:
                     if entry.kind != ENTRY_KIND_TASK:
                         raise PlanValidationError(
                             f"proposer {node.node_id!r} manifest may only contain the task, "
                             f"found {entry.kind!r} entry {entry.label!r}"
                         )
+                if len(entries) != 1:
+                    raise PlanValidationError(
+                        f"proposer {node.node_id!r} manifest must be exactly one task "
+                        f"entry, found {len(entries)} entries"
+                    )
             elif node.role == ROLE_REVIEWER:
-                missing = [p for p in proposers if p not in node.depends_on]
+                missing = [p.node_id for p in proposers if p.node_id not in node.depends_on]
                 if missing:
                     raise PlanValidationError(
                         f"review node {node.node_id!r} must depend on all proposers "
                         f"(hard barrier); missing {missing!r}"
                     )
-                reviewed = [
-                    e for e in node.input_manifest.entries if e.kind == ENTRY_KIND_PROPOSAL
-                ]
-                if not reviewed:
+                reviewed = [e for e in entries if e.kind == ENTRY_KIND_PROPOSAL]
+                tasks = [e for e in entries if e.kind == ENTRY_KIND_TASK]
+                if len(tasks) != 1 or len(reviewed) != 1 or len(entries) != 2:
                     raise PlanValidationError(
-                        f"review node {node.node_id!r} reviews no proposal"
+                        f"review node {node.node_id!r} manifest must be exactly the task "
+                        "plus one opposite proposal"
                     )
-                for entry in reviewed:
-                    assert entry.producer is not None  # _validate_manifest guarantees this
-                    if nodes[entry.producer].identity == node.identity:
-                        raise PlanValidationError(
-                            f"self-review: node {node.node_id!r} (identity "
-                            f"{node.identity!r}) would review its own identity's "
-                            f"proposal {entry.producer!r}"
-                        )
+                entry = reviewed[0]
+                assert entry.producer is not None  # _validate_manifest guarantees this
+                if nodes[entry.producer].identity == node.identity:
+                    raise PlanValidationError(
+                        f"self-review: node {node.node_id!r} (identity "
+                        f"{node.identity!r}) would review its own identity's "
+                        f"proposal {entry.producer!r}"
+                    )
             elif node.role == ROLE_JUDGE:
-                missing = [r for r in reviewers if r not in node.depends_on]
+                missing = [r.node_id for r in reviewers if r.node_id not in node.depends_on]
                 if missing:
                     raise PlanValidationError(
                         f"judge {node.node_id!r} must depend on all reviews; "
                         f"missing {missing!r}"
+                    )
+                judged = [e for e in entries if e.kind == ENTRY_KIND_PROPOSAL]
+                heard = [e for e in entries if e.kind == ENTRY_KIND_REVIEW]
+                tasks = [e for e in entries if e.kind == ENTRY_KIND_TASK]
+                if len(tasks) != 1 or len(entries) != 1 + len(proposers) + len(reviewers):
+                    raise PlanValidationError(
+                        f"judge {node.node_id!r} manifest must be exactly the task, "
+                        "every proposal, and every review"
+                    )
+                if {e.producer for e in judged} != {p.node_id for p in proposers}:
+                    raise PlanValidationError(
+                        f"judge {node.node_id!r} must receive exactly one proposal "
+                        "from every proposer"
+                    )
+                if {e.producer for e in heard} != {r.node_id for r in reviewers}:
+                    raise PlanValidationError(
+                        f"judge {node.node_id!r} must receive exactly one review "
+                        "from every reviewer"
                     )
             else:
                 raise PlanValidationError(
                     f"node {node.node_id!r} has unknown role {node.role!r}"
                 )
 
+        # Cross-manifest label consistency: a proposal label is one producer, everywhere.
+        proposal_labels: dict[str, str] = {}
+        for node in plan.nodes:
+            for entry in node.input_manifest.entries:
+                if entry.kind != ENTRY_KIND_PROPOSAL:
+                    continue
+                assert entry.producer is not None  # _validate_manifest guarantees this
+                existing = proposal_labels.get(entry.label)
+                if existing is not None and existing != entry.producer:
+                    raise PlanValidationError(
+                        f"proposal label {entry.label!r} maps to conflicting producers "
+                        f"{existing!r} and {entry.producer!r}"
+                    )
+                proposal_labels[entry.label] = entry.producer
+
+        # The sealed mapping must be an exact bijection: every key is a label the
+        # council actually uses, every proposer has exactly one label, no extras.
         for label, producer in sorted(plan.anonymization.items()):
             if producer not in nodes or nodes[producer].role != ROLE_PROPOSER:
                 raise PlanValidationError(
                     f"anonymization label {label!r} maps to non-proposer {producer!r}"
                 )
-        proposal_labels = {
-            entry.label: entry.producer
-            for node in plan.nodes
-            for entry in node.input_manifest.entries
-            if entry.kind == ENTRY_KIND_PROPOSAL
-        }
+        if set(plan.anonymization.keys()) != set(proposal_labels.keys()):
+            raise PlanValidationError(
+                f"sealed anonymization labels {sorted(plan.anonymization)!r} must be "
+                f"exactly the proposal labels in use {sorted(proposal_labels)!r}"
+            )
         for proposal_label, proposal_producer in proposal_labels.items():
             if plan.anonymization.get(proposal_label) != proposal_producer:
                 raise PlanValidationError(
                     f"proposal label {proposal_label!r} is not consistent with the sealed "
                     "anonymization mapping"
                 )
+        if sorted(plan.anonymization.values()) != sorted(p.node_id for p in proposers):
+            raise PlanValidationError(
+                "sealed anonymization must map exactly one label to every proposer"
+            )
 
     @staticmethod
     def _ancestors(node_id: str, nodes: Mapping[str, PlanNode]) -> frozenset[str]:
@@ -407,6 +472,15 @@ class BudgetTotals:
     cost_microusd: int
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetBreach:
+    """A commit pushed honest committed totals beyond a hard cap."""
+
+    dimension: str
+    committed: int
+    cap: int
+
+
 def _ceil_div(numerator: int, denominator: int) -> int:
     return -(-numerator // denominator)
 
@@ -418,8 +492,11 @@ def dispatch_cost_microusd(input_tokens: int, output_tokens: int, pricing: Prici
 
 
 class BudgetLedger:
-    """Hard admission: every dispatch reserves atomically before backend invocation.
+    """Hard admission plus an honest commit postcondition.
 
+    Every dispatch reserves atomically before backend invocation; actual usage
+    is committed exactly as the backend reported it, and a commit that pushes
+    totals beyond a cap reports a breach the caller must turn into run failure.
     Fake backends bill nothing on failure, so failed dispatches release their
     reservation at zero; live backends (G1) will commit failures at the ceiling.
     """
@@ -462,13 +539,32 @@ class BudgetLedger:
         self._inflight_tokens -= reservation.tokens
         self._inflight_cost -= reservation.cost_microusd
 
-    def commit(self, reservation: BudgetReservation, usage: Usage, cost_microusd: int) -> None:
+    def commit(
+        self, reservation: BudgetReservation, usage: Usage, cost_microusd: int
+    ) -> BudgetBreach | None:
+        """Record actual usage honestly; report a breach if a hard cap is now exceeded.
+
+        Actuals are always recorded — accounting never lies about what a backend
+        reported — but the caller must fail the run on a reported breach: a run
+        must never complete successfully above its configured caps.
+        """
         with self._lock:
             self._drop_inflight(reservation)
             self._committed_calls += reservation.calls
             self._committed_input_tokens += usage.input_tokens
             self._committed_output_tokens += usage.output_tokens
             self._committed_cost += cost_microusd
+            checks = (
+                (DIMENSION_CALLS, self._committed_calls, self._budget.max_calls),
+                (DIMENSION_TOKENS,
+                 self._committed_input_tokens + self._committed_output_tokens,
+                 self._budget.max_total_tokens),
+                (DIMENSION_COST, self._committed_cost, self._budget.max_cost_microusd),
+            )
+            for dimension, committed, cap in checks:
+                if committed > cap:
+                    return BudgetBreach(dimension=dimension, committed=committed, cap=cap)
+            return None
 
     def release(self, reservation: BudgetReservation) -> None:
         with self._lock:
@@ -620,14 +716,27 @@ class OneShotModelWorker:
         )
         try:
             result = await self._backend.complete(request)
-        except BackendError:
+        except BaseException:
+            # Fake backends bill nothing on failure (see BudgetLedger docstring):
+            # release the reservation on any failure so admission stays exact.
             self._ledger.release(reservation)
             raise
+
+        if result.usage.output_tokens > route.max_output_tokens:
+            # A backend reporting more output than the request permitted violates
+            # the backend contract; normalize it instead of trusting the claim.
+            self._ledger.release(reservation)
+            raise BackendError(
+                f"backend reported {result.usage.output_tokens} output tokens, "
+                f"above the route limit {route.max_output_tokens}"
+            )
 
         cost = dispatch_cost_microusd(
             result.usage.input_tokens, result.usage.output_tokens, route.pricing
         )
-        self._ledger.commit(reservation, result.usage, cost)
+        # Honest accounting first: the breach (if any) is raised only after the
+        # actual usage has been durably journaled below.
+        breach = self._ledger.commit(reservation, result.usage, cost)
         output_ref = self._artifacts.put(
             result.text.encode("utf-8"), media_type="text/plain", role=node.role
         )
@@ -654,6 +763,10 @@ class OneShotModelWorker:
             operation_id=operation_id,
             call_id=call_id,
         )
+        if breach is not None:
+            raise BudgetExceededError(
+                dimension=breach.dimension, committed=breach.committed, cap=breach.cap
+            )
         return WorkerResult(
             text=result.text, output_ref=output_ref, usage=result.usage, cost_microusd=cost
         )
@@ -699,6 +812,12 @@ class RunExecutor:
         self._failures: list[tuple[str, str]] = []
         self._decision: Decision | None = None
         self._status = RunStatus.CREATED
+        self._sink_error: str | None = None
+
+    @property
+    def sink_error(self) -> str | None:
+        """Set when the output sink failed mid-run and streaming was disabled."""
+        return self._sink_error
 
     def _emit(
         self,
@@ -725,7 +844,13 @@ class RunExecutor:
         line = self._journal.append(envelope)
         self._envelopes.append(envelope)
         if self._sink is not None:
-            self._sink(line, envelope)
+            try:
+                self._sink(line, envelope)
+            except Exception as exc:
+                # The journal is authoritative; the sink is an observer. A broken
+                # sink degrades streaming only — it must not fail a healthy run.
+                self._sink = None
+                self._sink_error = f"{type(exc).__name__}: {exc}"
 
     async def execute(self) -> tuple[RunStatus, dict[str, object]]:
         self._journal = self._store.open_journal(self._run.run_id)
@@ -744,9 +869,18 @@ class RunExecutor:
             self._emit(self._run_created)
             self._status = advance_run_status(self._status, RunStatus.RUNNING)
 
-            async with asyncio.TaskGroup() as group:
-                for node in self._run.plan.nodes:
-                    group.create_task(self._run_node(node, worker))
+            try:
+                async with asyncio.TaskGroup() as group:
+                    for node in self._run.plan.nodes:
+                        group.create_task(self._run_node(node, worker))
+            except BaseExceptionGroup as group_exc:
+                # Only durability failures (StorageError) escape the per-node
+                # taxonomy. Unwrap the first leaf so callers see the normalized
+                # engine error, and claim no terminal state for this run.
+                cause: BaseException = group_exc
+                while isinstance(cause, BaseExceptionGroup):
+                    cause = cause.exceptions[0]
+                raise cause from group_exc
 
             status = RunStatus.COMPLETED if not self._failures else RunStatus.FAILED
             reason = None
@@ -806,61 +940,81 @@ class RunExecutor:
                 )
                 return
 
-            self._emit(
-                NodeStarted(role=node.role, route_id=node.route_id),
-                node_id=node.node_id,
-                attempt=attempt.index,
-            )
-            entries = self._resolve_manifest(node)
-            route = self._run.routes[node.route_id]
             try:
-                result = await worker.execute(
-                    node=node, route=route, attempt=attempt, entries=entries
-                )
+                await self._execute_node(node, worker, attempt)
             except BudgetRejectedError as exc:
                 self._fail_node(node, attempt, REASON_BUDGET_REJECTED, str(exc))
-                return
+            except BudgetExceededError as exc:
+                self._fail_node(node, attempt, REASON_BUDGET_EXCEEDED, str(exc))
             except BackendError as exc:
                 self._fail_node(node, attempt, REASON_BACKEND_ERROR, str(exc))
-                return
-
-            if node.role == ROLE_JUDGE:
-                try:
-                    decision = parse_decision(
-                        result.text, frozenset(self._run.plan.anonymization.keys())
-                    )
-                except SpecError as exc:
-                    self._fail_node(node, attempt, REASON_INVALID_DECISION, str(exc))
-                    return
-                self._emit(
-                    NodeCompleted(output_sha256=result.output_ref.sha256),
-                    node_id=node.node_id,
-                    attempt=attempt.index,
+            except StorageError:
+                # Durable storage failed: the run must not fabricate terminal
+                # state on a store that just failed a write. Abort honestly.
+                raise
+            except Exception as exc:
+                # Unexpected worker/runtime failure: durable failed-node
+                # semantics instead of an abandoned, non-terminal run.
+                self._fail_node(
+                    node, attempt, REASON_UNEXPECTED_ERROR, f"{type(exc).__name__}: {exc}"
                 )
-                self._decision = decision
-                self._emit(
-                    DecisionRecorded(
-                        decision_version=decision.decision_version,
-                        winner=decision.winner,
-                        rationale=decision.rationale,
-                        source_sha256=result.output_ref.sha256,
-                    )
-                )
-            else:
-                self._emit(
-                    NodeCompleted(output_sha256=result.output_ref.sha256),
-                    node_id=node.node_id,
-                    attempt=attempt.index,
-                )
-            self._outcomes[node.node_id] = _NodeOutcome(
-                status=NodeStatus.COMPLETED, text=result.text
-            )
         finally:
             if node.node_id not in self._outcomes:
                 self._outcomes[node.node_id] = _NodeOutcome(
                     status=NodeStatus.FAILED, reason="internal_error"
                 )
             self._events[node.node_id].set()
+
+    async def _execute_node(
+        self, node: PlanNode, worker: OneShotModelWorker, attempt: Attempt
+    ) -> None:
+        self._emit(
+            NodeStarted(role=node.role, route_id=node.route_id),
+            node_id=node.node_id,
+            attempt=attempt.index,
+        )
+        entries = self._resolve_manifest(node)
+        route = self._run.routes[node.route_id]
+        result = await worker.execute(
+            node=node, route=route, attempt=attempt, entries=entries
+        )
+
+        if node.role == ROLE_JUDGE:
+            # Allowed winners come from the proposals the judge actually saw,
+            # not from the anonymization mapping keys.
+            allowed_winners = frozenset(
+                entry.label
+                for entry in node.input_manifest.entries
+                if entry.kind == ENTRY_KIND_PROPOSAL
+            )
+            try:
+                decision = parse_decision(result.text, allowed_winners)
+            except SpecError as exc:
+                self._fail_node(node, attempt, REASON_INVALID_DECISION, str(exc))
+                return
+            self._emit(
+                NodeCompleted(output_sha256=result.output_ref.sha256),
+                node_id=node.node_id,
+                attempt=attempt.index,
+            )
+            self._decision = decision
+            self._emit(
+                DecisionRecorded(
+                    decision_version=decision.decision_version,
+                    winner=decision.winner,
+                    rationale=decision.rationale,
+                    source_sha256=result.output_ref.sha256,
+                )
+            )
+        else:
+            self._emit(
+                NodeCompleted(output_sha256=result.output_ref.sha256),
+                node_id=node.node_id,
+                attempt=attempt.index,
+            )
+        self._outcomes[node.node_id] = _NodeOutcome(
+            status=NodeStatus.COMPLETED, text=result.text
+        )
 
     def _resolve_manifest(self, node: PlanNode) -> tuple[ResolvedInput, ...]:
         resolved: list[ResolvedInput] = []
@@ -901,6 +1055,7 @@ class CouncilRunResult:
     run_id: str
     status: RunStatus
     report_doc: dict[str, object]
+    sink_error: str | None = None
 
 
 def run_council(
@@ -971,4 +1126,6 @@ def run_council(
         sink=sink,
     )
     status, report_doc = asyncio.run(executor.execute())
-    return CouncilRunResult(run_id=run_id, status=status, report_doc=report_doc)
+    return CouncilRunResult(
+        run_id=run_id, status=status, report_doc=report_doc, sink_error=executor.sink_error
+    )

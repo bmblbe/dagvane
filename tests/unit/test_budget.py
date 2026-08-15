@@ -1,10 +1,14 @@
-"""BudgetLedger: multidimensional reserve → commit/release with hard admission."""
+"""BudgetLedger: multidimensional reserve → commit/release with hard admission,
+plus the commit postcondition — honest actuals may never complete a run above caps.
+"""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from dagvane.application.council import BudgetLedger, dispatch_cost_microusd
+from dagvane.application.council import BudgetBreach, BudgetLedger, dispatch_cost_microusd
 from dagvane.domain.models import Budget, BudgetRejectedError, Pricing, Usage
 
 
@@ -17,12 +21,68 @@ def _budget(**overrides: int) -> Budget:
 def test_reserve_commit_totals_use_actuals() -> None:
     ledger = BudgetLedger(_budget())
     reservation = ledger.reserve(tokens=1_000, cost_microusd=500)
-    ledger.commit(reservation, Usage(input_tokens=100, output_tokens=20), 60)
+    assert ledger.commit(reservation, Usage(input_tokens=100, output_tokens=20), 60) is None
     totals = ledger.totals()
     assert totals.calls == 1
     assert totals.input_tokens == 100
     assert totals.output_tokens == 20
     assert totals.cost_microusd == 60
+
+
+def test_commit_reports_token_breach_but_records_honestly() -> None:
+    ledger = BudgetLedger(_budget(max_total_tokens=100))
+    reservation = ledger.reserve(tokens=50, cost_microusd=1)
+    breach = ledger.commit(reservation, Usage(input_tokens=90, output_tokens=20), 1)
+    assert breach == BudgetBreach(dimension="total_tokens", committed=110, cap=100)
+    totals = ledger.totals()  # actuals are recorded even though the cap is broken
+    assert totals.input_tokens == 90
+    assert totals.output_tokens == 20
+
+
+def test_commit_reports_cost_breach_but_records_honestly() -> None:
+    ledger = BudgetLedger(_budget(max_cost_microusd=100))
+    reservation = ledger.reserve(tokens=1, cost_microusd=50)
+    breach = ledger.commit(reservation, Usage(input_tokens=1, output_tokens=1), 250)
+    assert breach == BudgetBreach(dimension="cost_microusd", committed=250, cap=100)
+    assert ledger.totals().cost_microusd == 250
+
+
+def test_commit_breach_persists_for_later_commits() -> None:
+    # Once actuals exceed a cap, every following commit also reports the breach:
+    # the run can never be driven back under its hard caps by more spending.
+    ledger = BudgetLedger(_budget(max_total_tokens=100))
+    first = ledger.reserve(tokens=10, cost_microusd=1)
+    second = ledger.reserve(tokens=10, cost_microusd=1)
+    assert ledger.commit(first, Usage(input_tokens=200, output_tokens=0), 1) is not None
+    later = ledger.commit(second, Usage(input_tokens=1, output_tokens=0), 1)
+    assert later is not None
+    assert later.dimension == "total_tokens"
+
+
+def test_concurrent_reservations_never_exceed_caps() -> None:
+    ledger = BudgetLedger(_budget(max_calls=4))
+    barrier = threading.Barrier(16)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def attempt() -> None:
+        barrier.wait()
+        try:
+            ledger.reserve(tokens=1, cost_microusd=1)
+        except BudgetRejectedError:
+            with lock:
+                outcomes.append("rejected")
+        else:
+            with lock:
+                outcomes.append("admitted")
+
+    threads = [threading.Thread(target=attempt) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert outcomes.count("admitted") == 4
+    assert outcomes.count("rejected") == 12
 
 
 def test_calls_dimension_rejects() -> None:

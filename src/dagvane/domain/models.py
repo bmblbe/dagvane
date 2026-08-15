@@ -45,6 +45,22 @@ class BudgetRejectedError(DagvaneError):
         )
 
 
+class BudgetExceededError(DagvaneError):
+    """Committed actual usage pushed totals beyond a hard cap (post-hoc breach).
+
+    The actual usage is still recorded honestly in the ledger and journal; the
+    run must fail rather than complete successfully above its configured caps.
+    """
+
+    def __init__(self, *, dimension: str, committed: int, cap: int) -> None:
+        self.dimension = dimension
+        self.committed = committed
+        self.cap = cap
+        super().__init__(
+            f"budget exceeded on {dimension}: committed {committed} above cap {cap}"
+        )
+
+
 class BackendError(DagvaneError):
     """A chat backend failed to produce a result."""
 
@@ -119,8 +135,21 @@ def advance_node_status(current: NodeStatus, target: NodeStatus) -> NodeStatus:
 # Closed set of node failure reasons exercised in G0.
 REASON_DEPENDENCY_FAILED = "dependency_failed"
 REASON_BUDGET_REJECTED = "budget_rejected"
+REASON_BUDGET_EXCEEDED = "budget_exceeded"
 REASON_BACKEND_ERROR = "backend_error"
 REASON_INVALID_DECISION = "invalid_decision"
+REASON_UNEXPECTED_ERROR = "unexpected_error"
+
+NODE_FAILURE_REASONS: frozenset[str] = frozenset(
+    {
+        REASON_DEPENDENCY_FAILED,
+        REASON_BUDGET_REJECTED,
+        REASON_BUDGET_EXCEEDED,
+        REASON_BACKEND_ERROR,
+        REASON_INVALID_DECISION,
+        REASON_UNEXPECTED_ERROR,
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +260,13 @@ class Plan:
     plan_version: int
     nodes: tuple[PlanNode, ...]
     anonymization: Mapping[str, str]  # sealed: candidate label -> producer node id
+
+    def __post_init__(self) -> None:
+        # Seal the mapping deeply: a private copy behind an immutable view, so
+        # no caller-held reference can mutate the anonymization after build.
+        object.__setattr__(
+            self, "anonymization", types.MappingProxyType(dict(self.anonymization))
+        )
 
 
 @dataclass(frozen=True, slots=True)

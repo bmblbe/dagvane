@@ -1,321 +1,202 @@
 # Dagvane — Developer Guide
 
-This document is for developers working **on** the Dagvane project itself (the
-source repository where the `dagvane` tool is built), not for end users running
-the tool in their session directories.
+This guide is for developers working **on** the Dagvane engine (the greenfield
+G0 implementation). The product-facing overview lives in `README.md`; the
+accepted architecture and research live under `docs/architecture/` and are
+**never modified by implementation work**.
 
----
+## 1. Ground rules
 
-## 1. Terminology (read this first)
+- Python **3.11+**, standard library only at runtime. No vendor SDKs, no HTTP
+  clients, no Pydantic — enforced mechanically by `tests/contract/test_imports.py`.
+- Wall-clock time and identifier entropy may enter **only** through
+  `src/dagvane/ports/runtime.py`; everything else receives clocks and id
+  sources by injection. This is what makes runs reproducible.
+- Frozen dataclasses for domain data; hand-rolled strict validation at
+  external boundaries (task files, fixture files, judge decisions, frames).
+- Every persisted or streamed byte flows through the canonical serializer in
+  `src/dagvane/protocol/frames.py` (sorted keys, no whitespace, UTF-8, one
+  trailing newline). Never serialize set-derived ordering; never embed
+  filesystem paths in persisted documents.
 
-To avoid confusion, the project uses precise terms. Use them consistently in
-code, comments, commits, and docs.
-
-| Term | Meaning |
-|------|---------|
-| **Dagvane project** | This repository — the source tree where `dagvane` is developed. |
-| **`dagvane`** | The command-line program this project produces. |
-| **Session directory** (= chat = project) | A user's working folder, initialized with `dagvane init`. |
-| **`.dagvane/`** | The state folder created inside a session directory. |
-| **Session** | A single chat thread (history file). Multi-session support is on the roadmap. |
-| **Provider** | An LLM backend (Anthropic today; OpenAI, Ollama, etc. later). |
-| **Agent** *(roadmap)* | A declarative specialist: role + prompt + model + tools. |
-| **Pipeline** *(roadmap)* | A per-task DAG of agents. |
-
-> Golden rule: **the `dagvane` tool is stateless.** All state lives in the
-> session directory. Never store runtime state in the project repository or in
-> global locations unless it is explicitly user-level configuration.
-
----
-
-## 2. Prerequisites
-
-- Python 3.9 or newer
-- Git
-- An Anthropic API key (for manual end-to-end testing)
-
----
-
-## 3. Setting Up the Development Environment
+## 2. Quality gates
 
 ```bash
-# 1. Clone the Dagvane project
-git clone https://github.com/yourname/dagvane.git
-cd dagvane
-
-# 2. Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-# 3. Install in editable mode with dev tools
-pip install -e ".[dev]"
+uv run pytest        # full suite, includes an offline installed-entry-point smoke test
+uv run ruff check .  # lint (E, F, I, W, UP, B; line length 100)
+uv run mypy          # strict mode over src and tests
 ```
 
-Editable mode (`-e`) means changes to `dagvane.py` take effect immediately —
-no reinstall needed. The `dagvane` command becomes available in your venv.
+All three must pass before any review hand-off. Plain `pytest` / `ruff` /
+`mypy` work equally well inside an activated venv with `pip install -e ".[dev]"`.
 
-Verify:
-
-```bash
-dagvane --help
-```
-
----
-
-## 4. Repository Layout
+## 3. Repository layout
 
 ```
-dagvane/                  # the Dagvane project (this repo)
-├── dagvane.py            # the CLI tool (single-file module today)
-├── pyproject.toml        # packaging + tooling config
-├── requirements.txt      # runtime dependencies
-├── .env.example          # secrets template for users
-├── .gitignore
-├── README.md             # user-facing overview
-└── DEVELOPMENT.md        # this file
+src/dagvane/
+  domain/models.py        # frozen dataclasses, run/node state machines,
+                          # closed event registry, closed failure reasons
+  ports/backend.py        # ChatBackend protocol, PreparedRequest, ChatResult
+  ports/runtime.py        # Clock and IdSource ports (+ System/Fixed impls)
+  ports/storage.py        # RunStore, EventJournal, ArtifactStore protocols
+  protocol/frames.py      # canonical JSON + NDJSON frame codec (strict decode)
+  protocol/documents.py   # task/fixture/decision boundary validation, doc builders
+  adapters/backends/fake.py     # deterministic fixture-driven backend (tests/CI only)
+  adapters/storage/filesystem.py # run dirs, CAS artifacts, gapless fsync'd journal
+  application/council.py  # CouncilTemplate, PlanValidator, BudgetLedger,
+                          # OneShotModelWorker, RunExecutor, entry points
+  application/replay.py   # fail-closed causal fold + derived views (RunReport)
+  cli.py                  # argparse surface, sinks, exit-code mapping
+tests/
+  unit/       contract/       integration/       fixtures/
+gui/          # placeholder only — the Qt client arrives at a later milestone
 ```
 
-> The project is currently a **single-file module** (`dagvane.py`). When it
-> grows, convert it into a package — see §10.
+## 4. The council-v1 contract
 
----
+`CouncilTemplate` builds the only plan G0 executes, and `PlanValidator`
+enforces it **exactly**: two proposers with distinct identities, two reviewers
+whose identities are exactly the proposer identities, one judge. Proposer
+manifests contain exactly the task (anti-anchoring); each reviewer receives
+the task plus exactly the *opposite* identity's proposal (blind, self-review
+structurally impossible); the judge receives the task, every proposal, and
+every review — all under sealed candidate labels. The anonymization mapping is
+a deeply immutable bijection between the candidate labels actually in use and
+the proposers; allowed judge winners are derived from the proposals the judge
+actually saw.
 
-## 5. Running the Tool During Development
+Reviews depend on **all** proposers (the hard barrier); the judge depends on
+all reviews. There is no degraded one-candidate council: if a proposer fails,
+reviews and judge fail with `dependency_failed`.
 
-Always test the tool in a **separate, throwaway session directory** so you never
-pollute the project repo with state.
+## 5. Event contract
 
-```bash
-# From anywhere, with the venv activated:
-mkdir -p /tmp/dagvane-test && cd /tmp/dagvane-test
-
-dagvane init
-# Add your key:
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .dagvane/secrets.env
-
-dagvane config view
-dagvane chat --message "Hello"
-dagvane history
-```
-
-Alternatively, run the script directly without installing:
-
-```bash
-python /path/to/dagvane/dagvane.py chat --message "Hello"
-```
-
-> ⚠️ Do **not** run `dagvane init` inside the project repository root. If you do,
-> the `.gitignore` rules protect secrets/history, but it is cleaner to test in
-> `/tmp` or a dedicated scratch folder.
-
----
-
-## 6. Architectural Principles (must follow)
-
-These invariants are non-negotiable. PRs that break them should be rejected.
-
-| Invariant | Implication for your code |
-|-----------|---------------------------|
-| **Stateless tool** | No hidden global state; read/write only the session's `.dagvane/`. |
-| **Session isolation** | Resolve paths from `Path.cwd()`; never reach into other sessions. |
-| **Non-interactive** | No `input()` prompts. Take input from flags or stdin; emit parseable output. |
-| **Provider neutrality** | Keep provider-specific code behind an adapter boundary (see §7). |
-| **Declarative extension** | Prefer config/data files over hard-coded behavior where it makes sense. |
-| **Observable runs** | Persist history; later, persist run metrics (tokens/cost). |
-| **Scriptable output** | Every command that returns data must support `--output {text,json}`. |
-
----
-
-## 7. Where Things Belong (current code)
-
-Until the project is split into packages, keep concerns grouped logically inside
-`dagvane.py`:
-
-| Concern | Functions / area |
-|---------|------------------|
-| **Paths / layout** | Module-level constants (`DAGVANE_DIR`, `CONFIG_PATH`, ...). |
-| **Guards** | `require_initialized()`. |
-| **Config** | `load_config()`, `save_config()`. |
-| **Secrets** | `load_secrets()`, `get_api_key()`. |
-| **History** | `session_file()`, `append_history()`, `load_history_messages()`. |
-| **Provider (the Voice)** | The Anthropic client call inside `cmd_chat()`. |
-| **Commands** | `cmd_init`, `cmd_chat`, `cmd_models`, `cmd_config_*`, `cmd_history`. |
-| **CLI wiring** | `build_parser()`, `main()`. |
-
-**Adding a new provider** (when that work begins): introduce a provider
-abstraction (a `chat(request) -> response` interface) and move the Anthropic
-call behind it. No command handler should import a vendor SDK directly.
-
----
-
-## 8. Adding a New Command
-
-1. Write a `cmd_<name>(args)` handler.
-2. Call `require_initialized()` if it needs session state.
-3. Register a subparser in `build_parser()` and set `func=cmd_<name>`.
-4. Support `--output {text,json}` if it returns data.
-5. Update `README.md` (Usage section) and, if relevant, the roadmap.
-
-Skeleton:
-
-```python
-def cmd_example(args):
-    require_initialized()
-    cfg = load_config()
-    # ... do work ...
-    if args.output == "json":
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(result)
-```
-
----
-
-## 9. Adding / Changing a Config Setting
-
-Config lives in `.dagvane/config.json`. To add a setting:
-
-1. Add a default to `DEFAULT_CONFIG`.
-2. If it needs type coercion, handle it in `cmd_config_set` (like
-   `max_tokens` → int, `temperature` → float).
-3. Document it in `README.md` (Configuration table).
-
-> `config set` validates keys against `DEFAULT_CONFIG`, so unknown keys are
-> rejected automatically. Keep `DEFAULT_CONFIG` the single source of truth.
-
----
-
-## 10. Growing Beyond a Single File
-
-When `dagvane.py` becomes too large, convert it into a package:
+Every event is a versioned `EventEnvelope` frame with gapless `seq` assigned
+by the single journal writer. The payload registry is closed:
 
 ```
-dagvane/
-├── __init__.py        # exposes main()
-├── cli.py             # build_parser(), main()
-├── context.py         # config, secrets, paths
-├── history.py         # session persistence
-├── providers/
-│   ├── base.py        # provider interface
-│   └── anthropic.py
-└── commands/
-    ├── chat.py
-    ├── config.py
-    └── ...
+run.created  node.started  artifact.written  model.dispatched  model.completed
+node.completed  node.failed  budget.rejected  decision.recorded  run.finished
 ```
 
-Then update `pyproject.toml`:
+Per successful node attempt the executor emits, in order: `node.started` →
+`artifact.written` (request snapshot) → `model.dispatched` →
+`artifact.written` (output) → `model.completed` → `node.completed`; the judge
+additionally emits `decision.recorded` after completing. `run.finished` is
+terminal-last — the journal refuses appends after it.
 
-```toml
-[project.scripts]
-dagvane = "dagvane.cli:main"
+Node failure reasons form a closed set:
+`dependency_failed`, `budget_rejected`, `budget_exceeded`, `backend_error`,
+`invalid_decision`, `unexpected_error`.
 
-[tool.setuptools.packages.find]
-where = ["."]
-```
+**Durable ordering per action:** serialize → journal append (fsync) → frame to
+the output sink → proceed. `events.jsonl` is authoritative for run state;
+`manifest.json` is the sealed pre-run configuration referenced by hash from
+`run.created`; `report.json`/`decision.json` are derived views rebuilt through
+the same fold that replay uses.
 
-(Remove the `py-modules = ["dagvane"]` line.)
+## 6. Replay is a fail-closed causal validator
 
----
+`application/replay.py` does not merely accumulate events — it rejects
+causally impossible histories with a normalized `ReplayError`:
 
-## 11. Code Quality
+- `model.completed` must correlate with an open `model.dispatched` on the same
+  node (operation and call ids are globally unique; duplicates rejected).
+- Dispatches must reference already-written request artifacts; completions and
+  `node.completed` must reference already-written outputs.
+- `decision.recorded` requires a completed judge whose output hash matches.
+- `run.finished` must agree with every node: all nodes declared by
+  `run.created` are tracked and terminal; a `completed` run has no failed
+  nodes, no reason, no dangling dispatches, and totals within its caps; a
+  `failed` run names a reason and contains a failed node.
 
-```bash
-# Lint
-ruff check .
+Failed nodes may leave an abandoned dispatch (the backend-error shape), and
+dependency-failed nodes legally go `pending → failed` without ever starting.
 
-# Auto-fix where possible
-ruff check . --fix
+## 7. Budgets: admit hard, commit honestly
 
-# Type-check
-mypy dagvane.py
+`BudgetLedger` enforces caps twice:
 
-# Run tests (once added)
-pytest
-```
+1. **Admission** — every dispatch atomically reserves (calls, estimated
+   tokens, ceiling cost) before backend invocation; rejection means the
+   backend is never called (`budget_rejected`).
+2. **Commit postcondition** — actual backend-reported usage is always recorded
+   honestly (journal and report show the real numbers), but if committed
+   totals now exceed any cap the worker raises `BudgetExceededError` *after*
+   journaling the honest `model.completed`, and the node — and therefore the
+   run — fails (`budget_exceeded`). A run can never complete successfully
+   above its configured caps, and replay independently rejects such journals.
 
-**Style expectations:**
-- Follow PEP 8 (enforced by `ruff`); line length 100.
-- Add type hints to new functions.
-- Keep functions small and single-purpose.
-- Prefer `pathlib.Path` over string paths.
-- Use `sys.exit("message")` for user-facing fatal errors (clean, no traceback).
+A backend claiming more output tokens than the route's `max_output_tokens`
+violates its contract and is normalized to a `backend_error` (billed at zero
+under the G0 fake-billing rule; live G1 backends will bill failures at the
+ceiling).
 
----
+## 8. Failure taxonomy
 
-## 12. Testing Guidance
+| Failure | Behavior |
+|---------|----------|
+| Backend error (normalized) | `node.failed: backend_error`; dependents `dependency_failed`; run `failed` with report. |
+| Invalid judge decision | `node.failed: invalid_decision`; run `failed`; no `decision.json`. |
+| Budget rejection at admission | `budget.rejected` + `node.failed: budget_rejected`; the backend is never invoked. |
+| Budget overrun at commit | honest `model.completed`, then `node.failed: budget_exceeded`; run `failed`. |
+| Unexpected exception in a node | `node.failed: unexpected_error`; run `failed` with report. |
+| Durable journal/artifact write failure | **abort without fabricated terminal state**: no `run.finished`, no report, `StorageError` propagates (exit 40). |
+| Output sink failure | streaming disabled, diagnostic on stderr; the run continues to its natural terminal state (the journal is authoritative). |
 
-The project does not yet ship tests. When adding them:
+A run-id collision with an existing run directory is refused atomically and
+currently surfaces as an internal error (exit 40); every pre-existing byte of
+the original run is preserved. A finer-grained conflict exit code is a G1
+decision.
 
-- Put tests under `tests/`.
-- **Never call the real Claude API in unit tests** — mock the provider client.
-- Use `tmp_path` (pytest fixture) as a fake session directory; `chdir` into it.
-- Test config load/save, history append/load, and command dispatch in isolation.
+## 9. Testing
 
-Example pattern:
+The suite runs the CLI via `python -m dagvane` subprocesses plus in-process
+`run_council` calls with injected ports; one module installs the project into
+a fresh venv offline and drives the real `dagvane` console script.
 
-```python
-def test_config_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    # run init, set a value, reload, assert
-```
+Deliberate oracle independence:
 
----
+- `tests/unit/test_replay_validator.py` folds **hand-built** journals, never
+  executor output.
+- `tests/integration/test_replay.py` re-derives the RunReport with a
+  test-local naive reducer over raw journal JSON.
+- `tests/integration/test_backend_isolation.py` uses an independent delayed,
+  capturing `ChatBackend` to prove the barrier and blindness at the backend
+  boundary (not from persisted snapshots).
+- Fixture files accept arbitrary usage values on purpose: they are the
+  adversarial-input channel for the budget postcondition tests.
 
-## 13. Git Workflow
+Shared fixtures live in `tests/fixtures/`: `task_basic.json`,
+`task_low_budget.json`, `fixture_happy.json`, `fixture_bad_decision.json`,
+`fixture_missing_model.json`. A session-scoped happy run (`r-happy-0001`) is
+reused by read-only tests (`tests/conftest.py`).
 
-- Branch per feature/fix: `feat/<name>`, `fix/<name>`, `docs/<name>`.
-- Keep commits focused and message-clear (imperative mood: "Add models command").
-- Never commit secrets. `.dagvane/secrets.env` and `*.env` are gitignored —
-  keep it that way.
-- Update `README.md` and this guide when behavior or structure changes.
+When adding tests, never call a real model API; fake backends only. New event
+types or payload fields are a versioned-contract change — extend the closed
+registry, the replay validator, and the negative matrices together.
 
-Suggested commit prefixes:
+## 10. Scope boundary (G0 → G1)
 
-```
-feat:   new user-facing capability
-fix:    bug fix
-docs:   documentation only
-refactor: internal change, no behavior change
-chore:  tooling / packaging / housekeeping
-test:   tests only
-```
+G0 deliberately contains **no** live providers, network access, shell/tools,
+Git/worktree management, external-agent adapters, dynamic Strategist, RAG,
+MCP/A2A, cost routing, or Qt implementation. Do not add them casually; each
+arrives at its own milestone in
+`docs/architecture/GREENFIELD_IMPLEMENTATION_SEQUENCE.md`.
 
----
+Known, intentional G1 seams:
 
-## 14. Roadmap Reference
+- `ModelRoute.backend` is recorded in manifests but not consulted at
+  execution time — the executor receives one backend instance. Mixed-provider
+  routing needs a routing boundary in G1.
+- Retry/repair policies (e.g. one-repair for invalid judge output), richer
+  exit-code taxonomy, and cancellation/resume semantics.
 
-Keep changes aligned with the intended evolution (see README roadmap):
+## 11. Owner decisions currently open
 
-1. Multiple named sessions per directory
-2. Provider abstraction + multi-provider support
-3. Unified model catalog
-4. Declarative custom agents
-5. Dynamic pipeline (DAG) construction
-6. Sandboxed tool layer
-7. Run history with cost/token metrics
-8. Fallback & retry across providers
+- Repository license (package metadata deliberately carries none; see
+  `README.md`).
+- Long-term credential storage policy.
+- Timing of the public replacement of the legacy default branch.
 
-When implementing any roadmap item, first establish its **boundary/interface**
-so later items can plug in without rewrites (especially the provider and agent
-abstractions).
-
----
-
-## 15. Quick Reference
-
-```bash
-# Setup
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Develop / test in a scratch session
-mkdir -p /tmp/dagvane-test && cd /tmp/dagvane-test
-dagvane init
-dagvane chat -m "test"
-
-# Quality gates
-ruff check . && mypy dagvane.py && pytest
-```
-
-Welcome aboard — keep it stateless, keep it scriptable, keep sessions isolated.
+Do not commit, merge, or publish without explicit owner instruction.

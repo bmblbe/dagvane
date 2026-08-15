@@ -17,6 +17,7 @@ from helpers import (
     CompletedRun,
     run_cli,
     run_council_cli,
+    snapshot_bytes,
 )
 
 
@@ -135,13 +136,19 @@ def test_council_text_output_renders_the_event_stream(tmp_path: Path) -> None:
     assert text.count("\n") == len(run.journal_lines())  # one rendered line per frame
 
 
-def test_rerunning_a_pinned_run_id_is_an_internal_error(tmp_path: Path) -> None:
+def test_rerunning_a_pinned_run_id_preserves_every_existing_byte(tmp_path: Path) -> None:
     first = run_council_cli(TASK_BASIC, FIXTURE_HAPPY, tmp_path, HAPPY_RUN_ID)
     assert first.returncode == 0
+    before = snapshot_bytes(first.run_dir)
+    assert set(before) >= {"manifest.json", "events.jsonl", "report.json", "decision.json"}
+    assert any(name.startswith("artifacts/") for name in before)
+
     second = run_cli(
         ["council", str(TASK_BASIC), "--fixture", str(FIXTURE_HAPPY)], tmp_path
     )
     assert second.returncode == 40
     assert b"already exists" in second.stderr
-    # the first run's durable state is untouched
-    assert first.journal_path.read_bytes()
+    assert second.stdout == b""
+    # Collision safety: the same files exist and every pre-existing byte —
+    # manifest, journal, report, decision, and all artifacts — is unchanged.
+    assert snapshot_bytes(first.run_dir) == before

@@ -59,6 +59,15 @@ class CompletedRun:
         return self.journal_path.read_bytes().splitlines(keepends=True)
 
 
+def snapshot_bytes(root: Path) -> dict[str, bytes]:
+    """Every file under ``root``, mapped relative path -> exact content bytes."""
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def run_council_cli(
     task_file: Path, fixture_file: Path, cwd: Path, run_id: str, output: str = "ndjson"
 ) -> CompletedRun:

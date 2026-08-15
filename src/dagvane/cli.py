@@ -172,6 +172,11 @@ def _cmd_council(args: argparse.Namespace) -> int:
         sink = None
 
     result = run_council(task=task, fixture=fixture, store=store, backend=backend, sink=sink)
+    if result.sink_error is not None:
+        _diag(
+            "output stream failed mid-run; the journal is authoritative: "
+            f"{result.sink_error}"
+        )
     _diag(
         f"run {result.run_id}: {result.status.value} "
         f"({store.run_dir(result.run_id)})"

@@ -214,11 +214,22 @@ registry, the replay validator, and the negative matrices together.
 
 ## 10. Scope boundary (G1 → G2)
 
-G1 deliberately contains **no** tools, shell, model-initiated file writes,
-Git/worktree management, external-agent adapters, automatic retries, dynamic
-Strategist, RAG, MCP/A2A, cost routing, or Qt implementation. Do not add them
-casually; each arrives at its own milestone in
+G1 itself deliberately contains **no** tools, shell, model-initiated file
+writes, Git/worktree management, external-agent adapters, automatic retries,
+dynamic Strategist, RAG, MCP/A2A, cost routing, or Qt implementation. Do not
+add them casually; each arrives at its own milestone in
 `docs/implementation/MASTER_PLAN.md`.
+
+The **Autonomous Developer MVP** (inserted between G1 and G2; currently a
+remediation candidate awaiting exact-SHA Codex re-review) carries the only
+sanctioned exceptions as a thin vertical slice: `adapters/localexec.py` and
+`adapters/agents/subprocess_runner.py` are the two allowlisted process-
+execution adapters, `workspace/` owns `.dagvane/` state and the per-goal
+one-writer lease, and `application/{goals,prepare,autodev,resources,chat}.py`
+implement the fixed goal workflow. Current architecture and honest
+limitations: `docs/architecture/modules/autodev/ARCHITECTURE.md`. A Git
+worktree there is checkout isolation, not a security sandbox — the G3
+sandbox remains unbuilt.
 
 Known, intentional G2 seams:
 

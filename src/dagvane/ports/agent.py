@@ -28,6 +28,17 @@ class AgentInvocation:
     # For runtime="command": argv template; "{prompt_file}" and
     # "{output_file}" placeholders are substituted (test double / custom CLI).
     command_template: tuple[str, ...] = field(default_factory=tuple)
+    # The child never inherits the host environment. Beyond the runner's
+    # fixed baseline, these explicitly configured names are copied in:
+    # ``env_passthrough`` for plain values, ``secret_env`` for credentials —
+    # every ``secret_env`` value is registered ephemerally with the process
+    # secret scrubber and must never be persisted.
+    env_passthrough: tuple[str, ...] = field(default_factory=tuple)
+    secret_env: tuple[str, ...] = field(default_factory=tuple)
+    # When set, the runner persists the spawned process identity (pid/pgid)
+    # here while the child runs, enabling owner cancellation and resume-time
+    # orphan reconciliation from another process. Removed after reaping.
+    process_record_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

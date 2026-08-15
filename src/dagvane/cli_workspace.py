@@ -13,13 +13,16 @@ import os
 import sys
 from pathlib import Path
 
-from dagvane.adapters.agents.subprocess_runner import SubprocessAgentRunner
+from dagvane.adapters.agents.subprocess_runner import (
+    SubprocessAgentRunner,
+    terminate_recorded_process,
+)
 from dagvane.adapters.localexec import GitOps
 from dagvane.application.autodev import GoalRunner, goal_show_doc
 from dagvane.application.chat import ConversationStore, run_chat
 from dagvane.application.goals import GoalStatus, GoalStore, approve
 from dagvane.application.localmodel import probe_local_model
-from dagvane.application.prepare import prepare_goal
+from dagvane.application.prepare import collect_baseline, prepare_goal
 from dagvane.application.resources import ResourceCatalog
 from dagvane.domain.models import SpecError
 from dagvane.ports.runtime import SystemClock, SystemIds, SystemMonotonic
@@ -226,7 +229,6 @@ def cmd_goal(args: argparse.Namespace) -> int:
             catalog=comp.catalog,
             runner=comp.runner,
             clock=comp.clock,
-            monotonic=comp.monotonic,
             name=args.name,
             conversation_id=conversation_id,
             progress=_progress,
@@ -255,6 +257,17 @@ def cmd_goal(args: argparse.Namespace) -> int:
         approve(record)
         comp.goals.save(record)
         comp.goals.log_event(name, {"event": "goal.approved"})
+        # Only now — after the owner approved the visible contract — are the
+        # (previously draft-only) commands executed for baseline evidence, in
+        # a disposable worktree pinned to the exact approved base SHA.
+        collect_baseline(
+            workspace=comp.workspace,
+            config=comp.config,
+            goals=comp.goals,
+            record=record,
+            monotonic=comp.monotonic,
+            progress=_progress,
+        )
         print(f"goal {name} approved (contract {record.contract_sha256})")
         return 0
     if command == "cancel":
@@ -262,6 +275,12 @@ def cmd_goal(args: argparse.Namespace) -> int:
         record.status = GoalStatus.CANCELLED
         comp.goals.save(record)
         comp.goals.log_event(name, {"event": "goal.cancelled"})
+        # Cancellation must actually stop an in-flight writer, not just
+        # record intent: terminate the recorded agent process group.
+        runner = _goal_runner(comp)
+        if terminate_recorded_process(runner.process_record_path(name)):
+            comp.goals.log_event(name, {"event": "goal.cancel_killed_agent"})
+            _progress("cancel     terminated the active external agent process group")
         print(f"goal {name} cancelled")
         return 0
     if command in ("run", "resume"):

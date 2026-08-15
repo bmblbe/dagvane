@@ -110,6 +110,21 @@ class SecretScrubber:
         # shorter raw replacement leaving recognizable fragments.
         self._variants = tuple(sorted(variants, key=len, reverse=True))
 
+    @property
+    def longest_variant_chars(self) -> int:
+        """Length of the longest registered rendering (0 when none registered).
+
+        Callers that retain only a bounded window of a larger stream cannot
+        scrub bytes they never saw: a rendering straddling the window edge
+        survives ``scrub()`` as a partial fragment shorter than the longest
+        variant. After scrubbing the retained window, dropping
+        ``longest_variant_chars - 1`` characters at the cut edge provably
+        removes any such fragment (a complete rendering inside the window was
+        already replaced; only a strict-prefix/suffix shorter than this bound
+        can remain at the edge).
+        """
+        return max((len(variant) for variant in self._variants), default=0)
+
     def scrub(self, text: str) -> str:
         """Replace every registered secret rendering until the text is stable.
 

@@ -37,6 +37,11 @@ class ResourceSpec:
     base_url: str | None = None
     enabled: bool = True
     command_template: tuple[str, ...] = ()
+    # Environment names granted to this runtime's child process beyond the
+    # runner's fixed baseline. ``secret_env`` values are credentials: they are
+    # registered ephemerally with the process secret scrubber, never persisted.
+    env_passthrough: tuple[str, ...] = ()
+    secret_env: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +68,18 @@ def _parse_resource(resource_id: str, raw: object) -> ResourceSpec:
         isinstance(part, str) for part in command_raw
     ):
         raise SpecError(f"resource {resource_id!r}: command must be a string list")
+
+    def str_tuple(key: str) -> tuple[str, ...]:
+        value = raw.get(key, [])
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise SpecError(
+                f"resource {resource_id!r}: {key} must be a list of "
+                "environment variable names"
+            )
+        return tuple(value)
+
     return ResourceSpec(
         resource_id=resource_id,
         kind=kind,
@@ -73,6 +90,8 @@ def _parse_resource(resource_id: str, raw: object) -> ResourceSpec:
         base_url=raw.get("base_url") if isinstance(raw.get("base_url"), str) else None,
         enabled=bool(raw.get("enabled", True)),
         command_template=tuple(command_raw),
+        env_passthrough=str_tuple("env_passthrough"),
+        secret_env=str_tuple("secret_env"),
     )
 
 

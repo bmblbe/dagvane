@@ -74,6 +74,21 @@ session reconstruction (G2), Dagvane-native tool sandbox (G3), full
 self-development exit criteria (G4), Qt GUI (G5), plus REPL/daemon,
 ProjectMemory/RAG, generic Strategist, ML routing.
 
+Status: the first implementation (`37ffdfd`) received an independent Codex
+acceptance review at `b40b9fb`: **REVISE** (unapproved command execution at
+prepare, missing ExternalAgent scrubbing/env boundary, mutable-worktree
+acceptance, unenforced one-writer, crash split-brain, disappearing review
+blockers, cosmetic cancellation, incomplete exact-SHA binding). A bounded
+remediation sprint addressed every finding — draft-only preparation with
+post-approval baseline at the exact base SHA, scrubbed/bounded/minimal-env
+agent subprocesses with process-group lifecycle, immutable-candidate
+verification, a per-goal one-writer lease, crash reconciliation, real
+cancellation, append-only SHA-bound review history, honest escalation — with
+twelve mandatory offline regressions. The result is a **candidate awaiting
+exact-SHA Codex re-review**; the milestone is not accepted and MilHRMS runs
+stay blocked until it passes. Current architecture:
+`../architecture/modules/autodev/ARCHITECTURE.md`.
+
 ## G2 — Context ownership + external read-only agents
 
 Only the context/session primitives actually needed for: LogicalConversation,

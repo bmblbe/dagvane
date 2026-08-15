@@ -170,22 +170,39 @@ dagvane config list                 # also: get <key> · set <key> <value> · ed
 
 dagvane goal prepare --from-conversation current --name my-demo
 dagvane goal show my-demo           # owner reviews the frozen contract draft
-dagvane goal approve my-demo        # freezes the contract by hash
+dagvane goal approve my-demo        # freezes the contract by hash, then
+                                    # collects baseline evidence
 dagvane goal run my-demo            # autonomous foreground loop (hours)
 dagvane goal resume my-demo         # continue after any crash/restart
-dagvane goal cancel my-demo
+dagvane goal cancel my-demo         # durable intent + stops the active writer
 ```
+
+`goal prepare` is **draft-only** and requires a clean repository: it
+persists the model-proposed contract for review but executes none of the
+proposed commands. Only after `goal approve` does Dagvane run them — as
+baseline evidence in a disposable worktree pinned to the exact approved base
+SHA, never in your checkout.
 
 `goal run` iterates a fixed deterministic workflow: evaluate objective
 acceptance checks → route cheap-first (deterministic tiers LOCAL → CHEAP →
 STANDARD → STRONG → CRITICAL, with attempt escalation) → one writer
-implements in a candidate Git worktree (`codex exec` by default, Ollama for
-bounded local analysis when capable) → deterministic verification commands →
-independent review when the change is substantial → BLOCKER/MAJOR
-remediation → evidence-based terminal status (`achieved` / `blocked` /
-`budget_exhausted` / `cancelled`). Anti-runaway wall-clock/call/attempt caps
-come from the frozen contract. Nothing is pushed or merged — integration
-stays owner authority.
+(enforced by a per-goal lease) implements in a candidate Git worktree
+(`codex exec` by default, Ollama for bounded local analysis when capable) →
+the committed candidate is verified in a fresh worktree pinned to its exact
+SHA → independent exact-SHA review when the change is substantial →
+BLOCKER/MAJOR remediation → evidence-based terminal status (`achieved` /
+`blocked` / `failed` / `budget_exhausted` / `cancelled`). Anti-runaway
+wall-clock/call/attempt caps come from the frozen contract. Nothing is
+pushed or merged — integration stays owner authority.
+
+External agent subprocesses run with a minimal deterministic environment;
+grant additional variables per resource via `env_passthrough` (plain names)
+and `secret_env` (credential names — values are registered with the
+in-memory secret scrubber and never persisted), e.g.
+`resources.my-agent.secret_env = ["MY_API_KEY"]` in `.dagvane/config.toml`.
+
+Status: the Autonomous Developer MVP is a remediated **candidate awaiting
+exact-SHA Codex re-review** (see `docs/development/CURRENT_STATE.md`).
 
 ## Durable run layout
 

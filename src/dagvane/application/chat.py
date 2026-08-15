@@ -219,6 +219,8 @@ def run_chat(
         timeout_seconds=timeout_seconds,
         write_access=False,  # chat analyzes; it never writes
         command_template=resource.command_template,
+        env_passthrough=resource.env_passthrough,
+        secret_env=resource.secret_env,
     )
     execution = runner.run(invocation)
     reply = execution.output_text.strip()

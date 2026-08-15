@@ -54,8 +54,12 @@ if "preparing a frozen Goal Contract" in prompt:
     }
     output.write_text(json.dumps(contract), encoding="utf-8")
 elif "single implementation writer" in prompt:
-    bump("implement-calls")
-    Path("dagvane-marker.txt").write_text("made by fake agent\n", encoding="utf-8")
+    call = bump("implement-calls")
+    # Attempt-numbered content: a remediation attempt must be able to produce
+    # a genuinely new candidate commit (same bytes would commit nothing).
+    Path("dagvane-marker.txt").write_text(
+        f"made by fake agent, attempt {call}\n", encoding="utf-8"
+    )
     output.write_text("Created the marker file.", encoding="utf-8")
 elif "independent reviewer" in prompt:
     call = bump("review-calls")
@@ -98,6 +102,20 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         },
         "router": {"local_enabled": False},
         "resources": {
+            # Workspace config merges OVER engine defaults: disable every
+            # default (real) resource so no routing decision can escape the
+            # offline fakes.
+            **{
+                resource_id: {"enabled": False}
+                for resource_id in (
+                    "codex-cheap",
+                    "codex-standard",
+                    "codex-strong",
+                    "codex-critical",
+                    "ollama-local",
+                    "agy-review",
+                )
+            },
             "fake-agent": {
                 "kind": "external_agent",
                 "runtime": "command",
@@ -109,6 +127,9 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "runtime": "command",
                 "tier": "STRONG",
                 "command": command,
+                # The child no longer inherits the host environment; the
+                # test toggle must be granted explicitly.
+                "env_passthrough": ["FAKE_REVIEW_BLOCKS"],
             },
         },
     }
@@ -220,10 +241,19 @@ def _prepare_and_approve(capsys: Any) -> None:
     doc = json.loads(shown.out)
     assert doc["status"] == "prepared"
     assert doc["contract"]["checks"][0]["check_id"] == "marker-exists"
-    # Baseline evidence: the check is unmet at the base SHA.
-    assert doc["baseline"]["checks"]["marker-exists"]["ok"] is False
+    # Draft-only preparation: no proposed command has run yet, so the
+    # baseline is honestly labeled pending.
+    assert doc["baseline"]["status"] == "pending"
+    assert "checks" not in doc["baseline"]
     assert main(["goal", "approve", "marker-goal"]) == 0
     capsys.readouterr()
+    # Baseline evidence is collected after approval, at the exact base SHA:
+    # the check is unmet there.
+    assert main(["goal", "show", "marker-goal"]) == 0
+    shown_doc = json.loads(capsys.readouterr().out)
+    assert shown_doc["baseline"]["status"] == "completed"
+    assert shown_doc["baseline"]["base_sha"] == shown_doc["contract"]["base_sha"]
+    assert shown_doc["baseline"]["checks"]["marker-exists"]["ok"] is False
 
 
 def test_goal_prepare_approve_run_achieves(workspace: Path, capsys: Any) -> None:

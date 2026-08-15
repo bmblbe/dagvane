@@ -106,3 +106,16 @@ def test_repr_never_exposes_values() -> None:
 
 def test_process_scrubber_is_one_shared_registry() -> None:
     assert process_scrubber() is process_scrubber()
+
+
+def test_longest_variant_chars_tracks_the_longest_rendering() -> None:
+    scrubber = SecretScrubber()
+    assert scrubber.longest_variant_chars == 0
+    scrubber.register("short-1")
+    baseline = scrubber.longest_variant_chars
+    assert baseline >= len("short-1")
+    # A value with escapes grows under encoding: the bound must cover the
+    # longest *rendering*, not merely the raw value.
+    scrubber.register('with "quotes" and \\backslashes\\ 22')
+    assert scrubber.longest_variant_chars > len('with "quotes" and \\backslashes\\ 22')
+    assert scrubber.longest_variant_chars >= baseline

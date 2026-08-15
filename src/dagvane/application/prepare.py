@@ -3,8 +3,18 @@
 ``goal prepare --from-conversation`` turns accepted conversation state plus
 actual repository inspection into an owner-reviewable frozen contract draft:
 objective, must-have scope, explicit non-goals, objective acceptance checks,
-verification gates, and baseline evidence at the exact base SHA. The owner
-never writes YAML — they review ``goal show`` output and approve.
+and verification gates. Preparation is **draft-only**: the model-proposed
+acceptance and verification commands are persisted for the owner to read but
+none of them is executed before the owner has approved the visible contract
+(``goal approve``). The owner never writes YAML — they review ``goal show``
+output and approve.
+
+Baseline evidence is collected only *after* approval, by ``collect_baseline``:
+the approved commands run in a disposable Git worktree pinned to the exact
+contract ``base_sha``, so the canonical target worktree is never mutated and
+the evidence can never come from a state different from the recorded base.
+The baseline is labeled ``pending`` until the collection completes; an
+interrupted collection is safely re-run (fresh disposable worktree each time).
 """
 
 from __future__ import annotations
@@ -51,7 +61,6 @@ def prepare_goal(
     catalog: ResourceCatalog,
     runner: ExternalAgentRunner,
     clock: Clock,
-    monotonic: Monotonic,
     name: str,
     conversation_id: str,
     progress: Progress,
@@ -64,9 +73,13 @@ def prepare_goal(
             )
     if not GitOps.is_repo(workspace.root):
         raise SpecError(f"{workspace.root} is not a git repository")
-    base_sha = GitOps.head_sha(workspace.root)
     if not GitOps.is_clean(workspace.root):
-        progress("warning    working tree is dirty; base SHA is HEAD anyway")
+        raise SpecError(
+            "the working tree is dirty; goal preparation requires a clean "
+            "repository so the contract base SHA describes the actual source "
+            "state — commit or stash your changes first"
+        )
+    base_sha = GitOps.head_sha(workspace.root)
 
     history = conversations.messages(conversation_id)
     if not history:
@@ -101,6 +114,8 @@ def prepare_goal(
             timeout_seconds=timeout,
             write_access=False,
             command_template=decision.resource.command_template,
+            env_passthrough=decision.resource.env_passthrough,
+            secret_env=decision.resource.secret_env,
         )
     )
     if not execution.succeeded:
@@ -115,30 +130,8 @@ def prepare_goal(
         limits=_limits_from_config(config),
     )
 
-    # Baseline evidence: run the drafted checks and gates at the base SHA.
-    progress("baseline   running acceptance checks and gates at the base SHA")
-    baseline_checks: dict[str, object] = {}
-    for check in contract.checks:
-        result = run_shell(
-            check.command, cwd=workspace.root, monotonic=monotonic, timeout_seconds=timeout
-        )
-        baseline_checks[check.check_id] = {
-            "ok": result.ok,
-            "exit_code": result.exit_code,
-        }
-        progress(
-            f"baseline   {check.check_id}: {'already met' if result.ok else 'unmet'}"
-        )
-    baseline_verify: list[dict[str, object]] = []
-    for command in contract.verify_commands:
-        result = run_shell(
-            command, cwd=workspace.root, monotonic=monotonic, timeout_seconds=timeout
-        )
-        baseline_verify.append(
-            {"command": command, "ok": result.ok, "exit_code": result.exit_code}
-        )
-        progress(f"baseline   {command}: {'ok' if result.ok else 'failing'}")
-
+    # Draft-only: the proposed commands are persisted for owner review but
+    # deliberately NOT executed here — baseline evidence follows approval.
     now = clock.now_iso()
     record = GoalRecord(
         contract=contract,
@@ -147,9 +140,8 @@ def prepare_goal(
         updated_ts=now,
         contract_sha256=None,
         baseline={
+            "status": "pending",
             "base_sha": base_sha,
-            "checks": baseline_checks,
-            "verify": baseline_verify,
             "prepared_from_conversation": conversation_id,
             "prompt_path": execution.prompt_path,
             "output_path": execution.output_path,
@@ -157,4 +149,92 @@ def prepare_goal(
     )
     goals.save(record)
     goals.log_event(name, {"event": "goal.prepared", "base_sha": base_sha})
+    progress(
+        "prepared   draft only: no proposed command has been executed; "
+        "baseline evidence follows owner approval"
+    )
     return record
+
+
+def collect_baseline(
+    *,
+    workspace: Workspace,
+    config: WorkspaceConfig,
+    goals: GoalStore,
+    record: GoalRecord,
+    monotonic: Monotonic,
+    progress: Progress,
+) -> None:
+    """Post-approval baseline evidence at the exact approved base SHA.
+
+    Runs the owner-approved acceptance checks and verification gates in a
+    disposable worktree pinned to ``contract.base_sha`` — never in the
+    canonical worktree. Idempotent: an interrupted collection leaves the
+    baseline labeled ``pending`` and the next call starts over from a fresh
+    disposable worktree.
+    """
+    contract = record.contract
+    if record.status is not GoalStatus.APPROVED:
+        raise SpecError(
+            f"goal {contract.name!r} is {record.status.value}; baseline "
+            "evidence is collected only after approval"
+        )
+    timeout = int(str(config.get("goal.agent_timeout_seconds")))
+    worktree = workspace.worktrees_dir / f"{contract.name}-baseline"
+    progress(
+        f"baseline   disposable worktree {worktree} @ {contract.base_sha[:12]}"
+    )
+    GitOps.fresh_worktree(workspace.root, worktree, contract.base_sha)
+    try:
+        baseline_checks: dict[str, object] = {}
+        for check in contract.checks:
+            result = run_shell(
+                check.command,
+                cwd=worktree,
+                monotonic=monotonic,
+                timeout_seconds=timeout,
+            )
+            baseline_checks[check.check_id] = {
+                "ok": result.ok,
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+            }
+            progress(
+                f"baseline   {check.check_id}: "
+                f"{'already met' if result.ok else 'unmet'}"
+            )
+        baseline_verify: list[dict[str, object]] = []
+        for command in contract.verify_commands:
+            result = run_shell(
+                command, cwd=worktree, monotonic=monotonic, timeout_seconds=timeout
+            )
+            baseline_verify.append(
+                {
+                    "command": command,
+                    "ok": result.ok,
+                    "exit_code": result.exit_code,
+                    "duration_ms": result.duration_ms,
+                }
+            )
+            progress(f"baseline   {command}: {'ok' if result.ok else 'failing'}")
+        record.baseline = {
+            **record.baseline,
+            "status": "completed",
+            "base_sha": contract.base_sha,
+            "checks": baseline_checks,
+            "verify": baseline_verify,
+        }
+        goals.save(record)
+        goals.log_event(
+            contract.name,
+            {"event": "baseline.completed", "base_sha": contract.base_sha},
+        )
+    finally:
+        try:
+            GitOps.worktree_remove(workspace.root, worktree)
+        except SpecError:  # pragma: no cover — cleanup is best-effort
+            pass
+
+
+def baseline_completed(record: GoalRecord) -> bool:
+    return record.baseline.get("status") == "completed"

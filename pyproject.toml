@@ -17,6 +17,12 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
+# Live provider adapters only; the default install stays dependency-free and
+# these are imported lazily inside adapters/backends/.
+live = [
+    "anthropic>=0.40",
+    "httpx>=0.27",
+]
 
 [project.scripts]
 dagvane = "dagvane.cli:main"
@@ -47,6 +53,12 @@ files = ["src/dagvane", "tests"]
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
+
+# Optional live-extra dependencies, imported lazily inside adapters; the dev
+# environment deliberately does not install them.
+[[tool.mypy.overrides]]
+module = ["anthropic", "anthropic.*", "httpx", "httpx.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

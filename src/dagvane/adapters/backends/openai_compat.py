@@ -19,6 +19,8 @@ from dagvane.adapters.backends.common import (
     optional_str,
     redact,
     usable_token_count,
+    usage_from_error_body,
+    watchdog_seconds,
 )
 from dagvane.domain.models import (
     DISPATCH_KIND_CONNECTION,
@@ -31,7 +33,7 @@ from dagvane.domain.models import (
     SpecError,
     Usage,
 )
-from dagvane.domain.secrets import SecretScrubber
+from dagvane.domain.secrets import SecretScrubber, process_scrubber
 from dagvane.ports.backend import ChatResult, PreparedRequest
 from dagvane.ports.runtime import Monotonic, SystemMonotonic
 
@@ -67,9 +69,12 @@ class OpenAICompatBackend:
         self._monotonic: Monotonic = monotonic if monotonic is not None else SystemMonotonic()
         self._client_factory = client_factory
         self._client: Any | None = None
-        # The shared process-wide registry when provided (cross-provider
-        # scrubbing); this adapter's own credential is always registered.
-        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
+        # Cross-provider scrubbing is an enforced invariant: adapters default
+        # to the process-wide registry (tests may inject a private one), and
+        # this adapter's own credential is always registered.
+        self._scrubber: SecretScrubber = (
+            scrubber if scrubber is not None else process_scrubber()
+        )
         self._scrubber.register(api_key)
 
     def ensure_ready(self) -> None:
@@ -172,7 +177,10 @@ class OpenAICompatBackend:
             "stream": False,
         }
         try:
-            async with asyncio.timeout(self._timeout_seconds):
+            # The watchdog runs behind the transport's own timers (grace) so
+            # precise pre-send classifications (PoolTimeout, ConnectTimeout)
+            # are never masked by an equal outer deadline (Codex M2).
+            async with asyncio.timeout(watchdog_seconds(self._timeout_seconds)):
                 response = await client.post(url, json=payload)
         except asyncio.CancelledError:
             raise
@@ -211,10 +219,22 @@ class OpenAICompatBackend:
             )
             snippet = scrubbed[:_BODY_SNIPPET_LIMIT]
             kind, billed = kind_for_status(status)
+            # An error body may still carry the provider's reported usage —
+            # what it may bill. Parse best-effort; never discard a known
+            # component merely because the response failed.
+            try:
+                error_body = response.json()
+            except Exception:  # noqa: BLE001 — error bodies are often not JSON
+                error_body = None
             raise BackendDispatchError(
                 kind=kind,
                 message=self._redact(f"HTTP {status}: {snippet}"),
                 billed=billed,
+                usage=usage_from_error_body(
+                    error_body,
+                    input_field="prompt_tokens",
+                    output_field="completion_tokens",
+                ),
                 receipt=self._receipt(started_ms, None),
             )
 

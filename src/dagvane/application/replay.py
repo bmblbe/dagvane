@@ -18,7 +18,9 @@ from dataclasses import dataclass, field
 
 from dagvane.domain.models import (
     BACKEND_DISPATCH_KINDS,
+    DISPATCH_KIND_CANCELLED,
     NODE_FAILURE_REASONS,
+    REASON_CANCELLED,
     ROLE_JUDGE,
     RUN_TERMINAL_STATUSES,
     USAGE_SOURCE_CEILING,
@@ -367,6 +369,18 @@ def fold_envelopes(
                     raise ReplayError(
                         f"model.failed for {node_id!r} carries negative billed amounts"
                     )
+                if (
+                    payload.reason == DISPATCH_KIND_CANCELLED
+                    and payload.usage_source != USAGE_SOURCE_CEILING
+                ):
+                    # The G1 cancellation rule is fixed: an ambiguous
+                    # potentially-sent dispatch always closes at the exact
+                    # reservation ceiling. Any other claimed source is a
+                    # fabricated cancellation history.
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} with reason "
+                        f"\"cancelled\" must carry usage_source \"ceiling\""
+                    )
                 if payload.usage_source == USAGE_SOURCE_CEILING and (
                     payload.billed_input_tokens + payload.billed_output_tokens
                     != dispatch.reserved_tokens
@@ -415,6 +429,19 @@ def fold_envelopes(
                     raise ReplayError(
                         f"node.failed for {node_id!r} has unknown reason "
                         f"{payload.reason!r}"
+                    )
+                if payload.reason == REASON_CANCELLED and any(
+                    open_node == node_id
+                    for open_node, _, _ in causal.open_dispatches
+                ):
+                    # The runtime rule: a cancelled node's open dispatch is
+                    # committed and closed (model.failed: cancelled) *before*
+                    # the node fails. A cancelled node with a dangling
+                    # dispatch is a journal that silently dropped billable
+                    # spend.
+                    raise ReplayError(
+                        f"node.failed for {node_id!r} with reason "
+                        f"\"cancelled\" while its dispatch is still open"
                     )
                 node.reason = payload.reason
             elif isinstance(payload, BudgetRejected):

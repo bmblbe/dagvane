@@ -21,11 +21,12 @@ FIXTURE_NAMES = (
 
 # "ANTHROPIC_API_KEY" left this list in G1: profiles legitimately name
 # credential environment variables in the documentation.
+# Prototype-era claims that must never resurface in the docs. "dagvane chat"
+# and "dagvane config set" left this list when the Autonomous Developer MVP
+# legitimately (re)introduced those commands.
 LEGACY_MARKERS = (
     "dagvane init",
-    "dagvane chat",
     "dagvane history",
-    "dagvane config set",
     "requirements.txt",
     "Python 3.9",
     "secrets.env",

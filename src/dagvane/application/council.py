@@ -82,7 +82,7 @@ from dagvane.domain.models import (
     estimate_tokens,
     payload_to_data,
 )
-from dagvane.domain.secrets import SecretScrubber
+from dagvane.domain.secrets import SecretScrubber, process_scrubber
 from dagvane.ports.backend import ChatBackend, PreparedRequest
 from dagvane.ports.runtime import Clock, FixedClock, IdSource, SequentialIds, SystemClock, SystemIds
 from dagvane.ports.storage import ArtifactStore, RunStore
@@ -691,7 +691,7 @@ class OneShotModelWorker:
         self._artifacts = artifacts
         self._ids = ids
         self._emit = emit
-        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
+        self._scrubber = scrubber if scrubber is not None else process_scrubber()
 
     def _emit_receipt(
         self,
@@ -1062,7 +1062,7 @@ class RunExecutor:
         self._ids = ids
         self._run_created = run_created
         self._sink = sink
-        self._scrubber = scrubber if scrubber is not None else SecretScrubber()
+        self._scrubber = scrubber if scrubber is not None else process_scrubber()
         self._ledger = BudgetLedger(run.budget)
         self._envelopes: list[EventEnvelope] = []
         self._events: dict[str, asyncio.Event] = {}
@@ -1188,41 +1188,53 @@ class RunExecutor:
     async def _run_node(self, node: PlanNode, worker: OneShotModelWorker) -> None:
         attempt = Attempt(node_id=node.node_id, index=1)
         try:
-            for dep in node.depends_on:
-                await self._events[dep].wait()
-            failed_dep = next(
-                (
-                    dep
-                    for dep in node.depends_on
-                    if self._outcomes[dep].status is not NodeStatus.COMPLETED
-                ),
-                None,
-            )
-            if failed_dep is not None:
-                self._fail_node(
-                    node,
-                    attempt,
-                    REASON_DEPENDENCY_FAILED,
-                    f"dependency {failed_dep} did not complete",
-                )
-                return
-
             try:
-                await self._execute_node(node, worker, attempt)
-            except BudgetRejectedError as exc:
-                self._fail_node(node, attempt, REASON_BUDGET_REJECTED, str(exc))
-            except BudgetExceededError as exc:
-                self._fail_node(node, attempt, REASON_BUDGET_EXCEEDED, str(exc))
-            except BackendError as exc:
-                self._fail_node(node, attempt, REASON_BACKEND_ERROR, str(exc))
-            except StorageError:
-                # Durable storage failed: the run must not fabricate terminal
-                # state on a store that just failed a write. Mark the engine-
-                # owned abort so sibling cancellations are distinguishable
-                # from backend-leaked ones, then abort honestly.
-                self._engine_abort = True
-                raise
+                for dep in node.depends_on:
+                    await self._events[dep].wait()
+                failed_dep = next(
+                    (
+                        dep
+                        for dep in node.depends_on
+                        if self._outcomes[dep].status is not NodeStatus.COMPLETED
+                    ),
+                    None,
+                )
+                if failed_dep is not None:
+                    self._fail_node(
+                        node,
+                        attempt,
+                        REASON_DEPENDENCY_FAILED,
+                        f"dependency {failed_dep} did not complete",
+                    )
+                    return
+
+                try:
+                    await self._execute_node(node, worker, attempt)
+                except BudgetRejectedError as exc:
+                    self._fail_node(node, attempt, REASON_BUDGET_REJECTED, str(exc))
+                except BudgetExceededError as exc:
+                    self._fail_node(node, attempt, REASON_BUDGET_EXCEEDED, str(exc))
+                except BackendError as exc:
+                    self._fail_node(node, attempt, REASON_BACKEND_ERROR, str(exc))
+                except StorageError:
+                    # Durable storage failed: the run must not fabricate
+                    # terminal state on a store that just failed a write. Mark
+                    # the engine-owned abort so sibling cancellations are
+                    # distinguishable from backend-leaked ones, then abort.
+                    self._engine_abort = True
+                    raise
+                except Exception as exc:
+                    # Unexpected worker/runtime failure: durable failed-node
+                    # semantics instead of an abandoned, non-terminal run.
+                    self._fail_node(
+                        node,
+                        attempt,
+                        REASON_UNEXPECTED_ERROR,
+                        f"{type(exc).__name__}: {exc}",
+                    )
             except asyncio.CancelledError:
+                # This guard covers the *whole* node lifetime — dependency
+                # waits included, not just the dispatch stage.
                 if self._engine_abort:
                     # Dagvane itself is tearing the run down (storage failure):
                     # propagate without touching the failed store.
@@ -1231,7 +1243,7 @@ class RunExecutor:
                 # cancelling its own worker task. `Task.cancelling()` cannot
                 # distinguish the two, so both close the node durably — no
                 # terminal journal may contain a non-terminal cancelled node,
-                # and the dispatch itself was already committed and closed by
+                # and any open dispatch was already committed and closed by
                 # the worker. External teardown still aborts the run through
                 # the parent task's own pending cancellation.
                 self._fail_node(
@@ -1245,12 +1257,6 @@ class RunExecutor:
                 if current is not None:
                     while current.cancelling():
                         current.uncancel()
-            except Exception as exc:
-                # Unexpected worker/runtime failure: durable failed-node
-                # semantics instead of an abandoned, non-terminal run.
-                self._fail_node(
-                    node, attempt, REASON_UNEXPECTED_ERROR, f"{type(exc).__name__}: {exc}"
-                )
         finally:
             if node.node_id not in self._outcomes:
                 self._outcomes[node.node_id] = _NodeOutcome(

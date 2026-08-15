@@ -465,7 +465,14 @@ def test_spontaneous_cancelled_error_fails_the_node_durably(tmp_path: Path) -> N
         async def _create(self, **kwargs: Any) -> object:
             model = kwargs["model"]
             if model == "anthro-judge":
-                raise asyncio.CancelledError()
+                # The original Codex M3 probe: the backend cancels its *own*
+                # worker task, making Task.cancelling() > 0 before the
+                # CancelledError is delivered at the next await point.
+                current = asyncio.current_task()
+                assert current is not None
+                current.cancel()
+                await asyncio.sleep(0)
+                raise AssertionError("cancellation must be delivered above")
             text = self._texts[model]
             return SimpleNamespace(
                 id=f"msg-{model}",

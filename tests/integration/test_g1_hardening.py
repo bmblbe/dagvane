@@ -24,7 +24,7 @@ from dagvane.adapters.storage.filesystem import FilesystemRunStore
 from dagvane.application.council import run_council_live
 from dagvane.domain.models import RunStatus
 from dagvane.domain.secrets import SecretScrubber
-from dagvane.ports.backend import ChatBackend
+from dagvane.ports.backend import ChatBackend, PreparedRequest
 from dagvane.ports.runtime import FixedClock, SequentialIds, SteppingMonotonic
 from dagvane.protocol.documents import load_task_file
 from dagvane.protocol.profiles import parse_profile
@@ -406,6 +406,174 @@ def test_pre_dispatch_emission_failure_releases_the_reservation() -> None:
     reservation = ledger.reserve(tokens=10, cost_microusd=10)
     assert reservation.calls == 1
     assert ledger.totals().calls == 0  # nothing was committed
+
+
+# ---------------------------------------------------------------------------
+# B3 (round 2) — the shared registry is a process-wide invariant, not a
+# composition-root convention
+# ---------------------------------------------------------------------------
+
+
+def test_independently_constructed_adapters_share_the_process_registry() -> None:
+    """Adapters built without an explicit scrubber default to one process-wide
+    registry: provider A's response is scrubbed of provider B's credential
+    even when nobody wired a shared instance."""
+    key_a = "sk-proc-reg-anthro-77410"
+    key_b = "sk-proc-reg-compat-77411"
+    AnthropicBackend(
+        connection_id="anthro-x",
+        api_key=key_a,
+        timeout_seconds=30,
+        monotonic=SteppingMonotonic(),
+        client_factory=lambda: None,
+    )
+
+    class ReflectingClient:
+        async def post(self, url: str, json: dict[str, object]) -> object:
+            return SimpleNamespace(
+                status_code=503,
+                text=f"other provider credential: {key_a}",
+                json=lambda: {},
+            )
+
+    compat = OpenAICompatBackend(
+        connection_id="compat-x",
+        base_url="https://api.example.test/v1",
+        api_key=key_b,
+        timeout_seconds=30,
+        monotonic=SteppingMonotonic(),
+        client_factory=lambda: ReflectingClient(),
+    )
+    from dagvane.domain.models import BackendDispatchError
+
+    request = PreparedRequest(model="m", max_output_tokens=32, system="s", user_text="x")
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat.complete(request))
+    message = str(excinfo.value)
+    assert key_a not in message
+    assert key_b not in message
+
+
+# ---------------------------------------------------------------------------
+# B4 (round 2) — usage reported on failure responses is committed
+# ---------------------------------------------------------------------------
+
+
+def test_error_response_usage_reaches_the_journal_as_provider_actuals(
+    tmp_path: Path,
+) -> None:
+    reflecting = RecordingHttpClient(
+        fail_status=503, fail_text="overloaded but processed"
+    )
+
+    async def post_with_usage(url: str, json: dict[str, object]) -> object:
+        return SimpleNamespace(
+            status_code=503,
+            text="overloaded but processed",
+            json=lambda: {
+                "error": "overloaded",
+                "usage": {"prompt_tokens": 100_000, "completion_tokens": 17},
+            },
+        )
+
+    reflecting.post = post_with_usage  # type: ignore[method-assign]
+    anthro = RecordingAnthropicClient(
+        {"anthro-model": "proposal", "anthro-judge": DECISION_TEXT}
+    )
+    backends, scrubber = build_backends(anthro, reflecting)
+    result, run_dir = run_live(tmp_path, backends, scrubber)
+
+    assert result.status is RunStatus.FAILED
+    events = journal_events(run_dir)
+    failed = [e for e in events if e["type"] == "model.failed"]
+    assert failed, "expected a billed model.failed for the 503"
+    for event in failed:
+        data = event["data"]
+        assert data["usage_source"] == "provider"
+        assert data["billed_input_tokens"] == 100_000
+        assert data["billed_output_tokens"] == 17
+
+
+# ---------------------------------------------------------------------------
+# External teardown (round 2) — dependency-waiting nodes close durably
+# ---------------------------------------------------------------------------
+
+
+def test_external_teardown_durably_cancels_dependency_waiting_nodes(
+    tmp_path: Path,
+) -> None:
+    """Cancelling the run externally must leave every node durably terminal —
+    including nodes that were still waiting on their dependencies, not just
+    the ones inside a dispatch."""
+    from dagvane.application.council import CouncilTemplate, RunExecutor
+    from dagvane.application.replay import fold_frames
+    from dagvane.domain.models import NodeStatus, Run, RunCreated
+
+    task = load_task_file(TASK_BASIC)
+    plan, routes, budget = CouncilTemplate.build(task.spec)
+
+    class HangingBackend:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def complete(self, request: Any) -> Any:
+            self.started.set()
+            await asyncio.Event().wait()
+
+    backend = HangingBackend()
+    store = FilesystemRunStore(tmp_path)
+    run_id = "r-teardown-0001"
+    store.create_run(run_id)
+    run = Run(
+        run_id=run_id,
+        task=task.spec,
+        plan=plan,
+        routes=routes,
+        budget=budget,
+        created_ts="2026-08-15T12:00:00.000Z",
+    )
+    executor = RunExecutor(
+        run=run,
+        store=store,
+        backends={"fake": backend},
+        clock=FixedClock("2026-08-15T12:00:00.000Z", 250),
+        ids=SequentialIds("teardown"),
+        run_created=RunCreated(
+            engine_version="test",
+            task_sha256=task.sha256,
+            plan_sha256="p" * 64,
+            fixture_sha256="f" * 64,
+            node_count=len(plan.nodes),
+            max_calls=budget.max_calls,
+            max_total_tokens=budget.max_total_tokens,
+            max_cost_microusd=budget.max_cost_microusd,
+        ),
+        sink=None,
+    )
+
+    async def scenario() -> None:
+        exec_task = asyncio.create_task(executor.execute())
+        await backend.started.wait()
+        exec_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await exec_task
+
+    asyncio.run(scenario())
+    frames = (
+        (tmp_path / ".dagvane" / "runs" / run_id / "events.jsonl")
+        .read_bytes()
+        .splitlines(keepends=True)
+    )
+    view = fold_frames(iter(frames), require_terminal=False)
+    assert set(view.nodes.keys()) == {n.node_id for n in plan.nodes}
+    for node in view.nodes.values():
+        assert node.status is NodeStatus.FAILED
+        assert node.reason == "cancelled"
+    # Dependency-waiting nodes (reviewers, judge) have no dispatch; the
+    # dispatching proposers were committed at the ceiling before closing.
+    assert view.nodes["judge"].calls == 0
+    assert view.nodes["proposer-a"].calls == 1
+    assert view.nodes["proposer-a"].cost_microusd > 0
 
 
 # ---------------------------------------------------------------------------

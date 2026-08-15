@@ -13,6 +13,7 @@ from dagvane.domain.models import (
     DISPATCH_KIND_AUTH,
     DISPATCH_KIND_PROTOCOL,
     DISPATCH_KIND_RATE_LIMIT,
+    PartialUsage,
 )
 from dagvane.domain.secrets import SecretScrubber
 
@@ -20,6 +21,17 @@ from dagvane.domain.secrets import SecretScrubber
 # frames are capped at 1 MiB, so provider error bodies must be bounded long
 # before that limit.
 MAX_ERROR_MESSAGE_CHARS = 2000
+
+# The adapter's asyncio watchdog runs *behind* the transport's own timeout by
+# this many seconds. The transport timers are per-phase and classify precisely
+# (PoolTimeout/ConnectTimeout are pre-send, never billed); an equal outer
+# deadline would win the race and mask them as a generic billed timeout. The
+# watchdog remains only a backstop for a wedged transport.
+WATCHDOG_GRACE_SECONDS = 5
+
+
+def watchdog_seconds(timeout_seconds: int) -> int:
+    return timeout_seconds + WATCHDOG_GRACE_SECONDS
 
 # httpx exception class names that prove the request never reached the
 # provider (nothing to bill) — matched by name so test doubles and the lazy
@@ -88,3 +100,27 @@ def usable_token_count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
+
+
+def usage_from_error_body(
+    body: object,
+    *,
+    input_field: str = "input_tokens",
+    output_field: str = "output_tokens",
+) -> PartialUsage | None:
+    """Best-effort provider-reported usage carried by an error body.
+
+    A provider that reports usage on a failure response is reporting what it
+    may bill; discarding it because the response failed would understate
+    spend (Codex B4). Returns None when no component is present.
+    """
+    if not isinstance(body, dict):
+        return None
+    usage_obj = body.get("usage")
+    if not isinstance(usage_obj, dict):
+        return None
+    reported = PartialUsage(
+        input_tokens=usable_token_count(usage_obj.get(input_field)),
+        output_tokens=usable_token_count(usage_obj.get(output_field)),
+    )
+    return None if reported.is_empty() else reported

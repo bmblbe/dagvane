@@ -1,25 +1,55 @@
-"""Ephemeral secret registry and scrubbing boundary (G1 hardening).
+"""Ephemeral secret registry and scrubbing boundary (G1 hardening, round 2).
 
-One ``SecretScrubber`` instance holds every configured credential value for
-the process — in memory only, never persisted — and is shared by all backend
-adapters and the durable-event path. Everything provider-derived (response
-content, model names, request ids, error text) passes through ``scrub()``
-before it may be truncated, persisted, or forwarded to another provider.
+One process-wide ``SecretScrubber`` holds every configured credential value —
+in memory only, never persisted — and is shared by all backend adapters and
+the durable-event path. Everything provider-derived (response content, model
+names, request ids, error text) passes through ``scrub()`` before it may be
+truncated, persisted, or forwarded to another provider.
 
-Scrubbing replaces each registered value *and its common encoded forms*:
+Scrubbing replaces each registered value and the closure of its common
+encoded renderings up to two nesting levels (JSON-in-JSON reflections):
 
 - the raw value;
-- the ``unicode_escape`` form (transport libraries ``repr()`` header values);
-- the JSON-escaped form (values reflected inside JSON bodies);
-- the ``repr()`` inner form (mixed-quote values rendered by ``repr``).
+- ``unicode_escape`` (transport libraries ``repr()`` header values);
+- the JSON-escaped inner form (values reflected inside JSON bodies);
+- the ``repr()`` inner form (mixed-quote values);
+- every second-level composition of the above (e.g. JSON-escaped twice).
 
-Scrub-before-truncate is the caller's contract: a truncation applied first
-could keep an identifying prefix of a secret that straddles the boundary.
+The replacement marker cannot itself defeat a literal secret-byte scan: a
+credential that overlaps the marker (either direction, in any rendering) is
+*refused at registration* with a configuration error, so after scrubbing no
+registered rendering can remain. ``scrub()`` re-applies passes until the text
+is stable, so juxtaposition around inserted markers cannot resurrect a
+rendering. Scrub-before-truncate is the caller's contract: a truncation
+applied first could keep an identifying prefix of a secret that straddles the
+boundary.
 """
 
 from __future__ import annotations
 
 import json
+
+from dagvane.domain.models import SpecError
+
+_MAX_SCRUB_PASSES = 10
+
+
+def _renderings(value: str) -> set[str]:
+    """The closure of common encoded forms of ``value``, depth 2."""
+
+    def json_inner(text: str) -> str:
+        return json.dumps(text)[1:-1]
+
+    def unicode_escaped(text: str) -> str:
+        return text.encode("unicode_escape").decode("ascii")
+
+    def repr_inner(text: str) -> str:
+        return repr(text)[1:-1]
+
+    encoders = (json_inner, unicode_escaped, repr_inner)
+    level_one = {value} | {encode(value) for encode in encoders}
+    level_two = {encode(form) for form in level_one for encode in encoders}
+    return {form for form in level_one | level_two if form}
 
 
 class SecretScrubber:
@@ -41,24 +71,54 @@ class SecretScrubber:
         return f"SecretScrubber(secrets={len(self._values)})"
 
     def register(self, value: str) -> None:
-        """Register one credential value (idempotent). Empty values are ignored."""
+        """Register one credential value (idempotent). Empty values are ignored.
+
+        A value whose renderings overlap the replacement marker is refused:
+        replacing such a secret could leave (or re-insert) its exact bytes,
+        defeating a literal secret-byte scan.
+        """
         if not value or value in self._values:
             return
+        for rendering in _renderings(value):
+            if rendering in self._REPLACEMENT or self._REPLACEMENT in rendering:
+                raise SpecError(
+                    "credential value overlaps the redaction marker and cannot "
+                    "be scrubbed reliably; choose a different credential"
+                )
         self._values.add(value)
         variants: set[str] = set()
         for secret in self._values:
-            variants.add(secret)
-            escaped = secret.encode("unicode_escape").decode("ascii")
-            variants.add(escaped)
-            variants.add(json.dumps(secret)[1:-1])
-            variants.add(repr(secret)[1:-1])
+            variants.update(_renderings(secret))
         # Longest first: an encoded form must not be half-destroyed by a
         # shorter raw replacement leaving recognizable fragments.
         self._variants = tuple(sorted(variants, key=len, reverse=True))
 
     def scrub(self, text: str) -> str:
-        """Replace every registered secret (all encoded forms) in ``text``."""
-        for variant in self._variants:
-            if variant in text:
-                text = text.replace(variant, self._REPLACEMENT)
+        """Replace every registered secret rendering until the text is stable.
+
+        Multiple passes close the juxtaposition gap: an insertion of the
+        marker could abut surviving bytes into another registered rendering,
+        which the next pass removes. Registration guarantees no rendering
+        overlaps the marker itself, so passes converge.
+        """
+        if not self._variants:
+            return text
+        for _ in range(_MAX_SCRUB_PASSES):
+            before = text
+            for variant in self._variants:
+                if variant in text:
+                    text = text.replace(variant, self._REPLACEMENT)
+            if text == before:
+                break
         return text
+
+
+# The process-wide registry: adapters and the durable-event path default to
+# this shared instance, making cross-provider scrubbing an enforced invariant
+# rather than a composition-root convention. Tests may construct private
+# scrubbers explicitly.
+_PROCESS_SCRUBBER = SecretScrubber()
+
+
+def process_scrubber() -> SecretScrubber:
+    return _PROCESS_SCRUBBER

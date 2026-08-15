@@ -607,6 +607,56 @@ def test_compat_partial_usage_is_preserved_on_missing_component() -> None:
     assert excinfo.value.usage.output_tokens is None
 
 
+def test_compat_error_body_usage_is_preserved() -> None:
+    """A failed HTTP response that reports usage is reporting what the
+    provider may bill; the known components must ride on the error (Codex B4
+    round 2)."""
+    body = {"error": "overloaded", "usage": {"prompt_tokens": 100_000, "completion_tokens": 17}}
+    client = FakeHttpClient(
+        response=FakeHttpResponse(status_code=503, body=body, text="overloaded")
+    )
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "api"
+    assert excinfo.value.billed is True
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.input_tokens == 100_000
+    assert excinfo.value.usage.output_tokens == 17
+
+
+def test_compat_non_json_error_body_still_normalizes() -> None:
+    client = FakeHttpClient(
+        response=FakeHttpResponse(status_code=503, body=_RAISE, text="plain text")
+    )
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.usage is None
+
+
+def test_anthropic_status_exception_body_usage_is_preserved() -> None:
+    """A status-bearing SDK exception whose body reports usage must not lose
+    the provider's actuals (Codex B4 round 2)."""
+    error = FakeStatusError(200, "malformed but billed")
+    error.body = {"usage": {"input_tokens": 100_000, "output_tokens": 17}}  # type: ignore[attr-defined]
+    client = FakeAnthropicClient(error=error)
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(anthropic_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "protocol"
+    assert excinfo.value.billed is True
+    assert excinfo.value.usage is not None
+    assert excinfo.value.usage.input_tokens == 100_000
+    assert excinfo.value.usage.output_tokens == 17
+
+
+def test_watchdog_runs_behind_the_transport_timers() -> None:
+    """The adapter watchdog must never race the transport's own (precise,
+    pre-send-classifying) timers at equal deadlines (Codex M2 round 2)."""
+    from dagvane.adapters.backends.common import WATCHDOG_GRACE_SECONDS, watchdog_seconds
+
+    assert WATCHDOG_GRACE_SECONDS > 0
+    assert watchdog_seconds(30) == 30 + WATCHDOG_GRACE_SECONDS
+
+
 def test_success_fields_are_scrubbed_before_leaving_the_adapter() -> None:
     """Successful response content, model name, and provider request id are
     provider-derived and must be scrubbed (Codex B3)."""

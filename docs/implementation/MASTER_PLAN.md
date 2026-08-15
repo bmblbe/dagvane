@@ -45,6 +45,35 @@ ProjectMemory.
 
 Details: `../architecture/modules/backends/ARCHITECTURE.md` + `PLAN.md`.
 
+## Autonomous Developer MVP — bootstrap crossover (owner decision, 2026-08-15)
+
+Inserted between G1 and G2 to reach the crossover from "Claude develops
+Dagvane" to "Dagvane develops software autonomously" before further
+milestone work — the immediate target is MilHRMS. A deliberately thin
+vertical slice through G2/G3/G4 concerns:
+
+- workspace mode: `.dagvane/` state root in any Git project, TOML config CLI;
+- non-interactive `dagvane chat` over durable Dagvane-owned
+  LogicalConversations (per-exchange prompt artifacts as the ContextSnapshot
+  seam; provider sessions are hints only);
+- generic subprocess ExternalAgent runner (Codex required; agy optional;
+  `command` runtime for tests) — separate from ChatBackend;
+- deterministic cheap-first router over an explicit resource catalog
+  (LOCAL → CHEAP → STANDARD → STRONG → CRITICAL, attempt escalation);
+- Ollama capability probe (LOCAL_FAST) with CHEAP fallback;
+- durable Goal Contracts: exact base SHA, objective acceptance-check
+  commands, baseline evidence, approval freeze by hash,
+  CONTRACT_AMENDMENT_REQUIRED;
+- the fixed autonomous state machine: evaluate → route → one writer in a
+  candidate Git worktree → deterministic verification → independent review →
+  remediation → evidence-based terminal status; durable per-stage state,
+  crash/resume, anti-runaway caps; no push, no merge.
+
+Still deferred to their original milestones: full ContextSnapshot schema and
+session reconstruction (G2), Dagvane-native tool sandbox (G3), full
+self-development exit criteria (G4), Qt GUI (G5), plus REPL/daemon,
+ProjectMemory/RAG, generic Strategist, ML routing.
+
 ## G2 — Context ownership + external read-only agents
 
 Only the context/session primitives actually needed for: LogicalConversation,

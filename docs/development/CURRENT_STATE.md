@@ -5,19 +5,37 @@ changes; do not turn it into a diary).*
 
 ## Where we are
 
-- **Milestone:** G1 — live multi-provider council: **implemented, locally
-  green, awaiting external review** (Codex acceptance + Gemini/DeepSeek
-  checkpoint; prompts under `.dagvane/dev/current/`).
-- **G1 candidate SHA:** `2024bd207d0aba1354a010d5c5b692a4c73a6357` on `main`.
-- **Done before that:** G0 deterministic council skeleton — consolidated into
-  `main` and signed off on Python 3.11.15 (tag `g0-verified`, commit
-  `74837de`). An internal multi-agent adversarial review of the G1 diff ran
-  before the external round; its confirmed findings (2 BLOCKER, 7 MAJOR,
-  8 MINOR) were fixed in `2024bd2`.
-- **Repository:** `~/garage/dagvane` is the only development repository;
-  branch `main`. Former siblings (`dagvane-g0`, `dagvane-v2-base`,
-  `dagvane-council`) were merged/archived and removed; raw council history
-  lives locally under `.dagvane/dev/archive/` (Git-ignored).
+- **Milestone:** Autonomous Developer MVP — **implemented and dogfooded**;
+  the crossover from "Claude develops Dagvane" to "Dagvane develops software
+  autonomously" is usable for MilHRMS now.
+- **G1 hardening:** the independent Codex acceptance review (REVISE, findings
+  B1–B6/M1–M5/N1 against candidate `2024bd2`) was fully remediated in
+  `4055c3e42809eedfd532b978d7ee6b22c8378e0d` (secret-scrubbing boundary,
+  exact loopback semantics, per-component usage truthfulness, conservative
+  cancellation accounting, replay ceiling validation, client lifecycle,
+  PoolTimeout pre-send, reservation cleanup, credential_env validation).
+  Exact-SHA Codex re-review (gpt-5.6-sol, ultra, read-only): see
+  `.dagvane/dev/current/agents/codex/REVIEW_R2.md`.
+- **Autonomous Developer MVP:** commit `37ffdfd417cab87b9bdbb6c9d0d031da48248d99`
+  — workspace chat over durable LogicalConversations, workspace config CLI,
+  frozen Goal Contracts (exact base SHA + objective acceptance-check
+  commands + approval hash + CONTRACT_AMENDMENT_REQUIRED), generic
+  subprocess ExternalAgent runner (Codex/agy/command), deterministic
+  cheap-first router with attempt escalation, Ollama LOCAL_FAST probe,
+  fixed autonomous state machine (one writer in a candidate worktree,
+  deterministic verification, policy-gated independent review, remediation,
+  anti-runaway caps, crash/resume). See MASTER_PLAN's
+  "Autonomous Developer MVP" entry for scope and deferrals.
+- **Dogfood evidence (real run on this repository):** goal `runs-list`
+  (`dagvane runs list` + `FilesystemRunStore.list_run_ids()` + integration
+  test) — chat ×2 → `goal prepare` → `approve`
+  (contract `88147bc2…`) → `goal run` → **kill -9 mid-implementation** →
+  `goal resume` in a fresh process → candidate/tested SHA
+  `b4e0d5167a8991f6832348a3f2e581ab63c30acc` (worktree
+  `.dagvane/worktrees/runs-list-goalrun-530d4d…`), 3/3 acceptance checks,
+  full gates green in the worktree, independent review (codex-strong,
+  gpt-5.6-sol/high) passed. Implementer was codex-standard
+  (gpt-5.6-terra/medium). The candidate is NOT merged — owner authority.
 
 ## Quality gates
 
@@ -26,20 +44,15 @@ uv sync --python 3.11 --extra dev --locked
 uv run pytest && uv run ruff check . && uv run mypy
 ```
 
-At `2024bd2`: **263 passed, 1 skipped** (opt-in live suite), ruff clean,
+At `37ffdfd`: **308 passed, 1 skipped** (opt-in live suite), ruff clean,
 strict mypy clean, Python 3.11.15. The default suite is offline and
-provider-free; live tests need `DAGVANE_LIVE_TESTS=1` + a profile.
+provider-free (external agents are faked through the `command` runtime).
 
 ## Current work
 
-Module: **backends** (`../architecture/modules/backends/ARCHITECTURE.md`).
-
-Next concrete steps:
-1. Owner runs the three external reviews (`.dagvane/dev/current/agents/*/PROMPT.md`).
-2. Claude disposition of findings → bounded fixes → gates → Codex exact-SHA
-   re-review if BLOCKER/MAJOR existed.
-3. Owner approval → milestone tag `g1-accepted` → live smoke on ≥2 real
-   vendor families under a tight budget → begin G2 module architecture.
+Next: use Dagvane on MilHRMS (`cd ~/garage/milhrms; dagvane chat ...` →
+`goal prepare/approve/run`). Engine-side follow-ups belong to G2+ per
+MASTER_PLAN.
 
 ## Open owner decisions
 
@@ -47,6 +60,7 @@ Next concrete steps:
    deliberately silent).
 2. Long-term credential storage (env vars now; keyring/secrets file later).
 3. Timing of public replacement of the legacy default branch on the remote.
+4. Whether to merge the dogfood candidate `b4e0d51` (`dagvane runs list`).
 
 ## Read more
 

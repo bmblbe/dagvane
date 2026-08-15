@@ -638,14 +638,28 @@ def test_ceiling_cost_mismatch_must_not_replay() -> None:
         fold_envelopes(journal.envelopes, require_terminal=False)
 
 
+def cancelled_journal(payload: ModelFailed | None) -> Journal:
+    """The runtime cancellation shape: optional model.failed(cancelled), then
+    node.failed(cancelled)."""
+    journal = Journal()
+    journal.add(created(1))
+    journal.add(NodeStarted(role="proposer", route_id="live/x"), node_id="n1")
+    journal.add(artifact(REQ_SHA), node_id="n1")
+    journal.add(dispatched(), node_id="n1", operation_id="op-1", call_id="call-1")
+    if payload is not None:
+        journal.add(payload, node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(NodeFailed(reason="cancelled", message="cancelled"), node_id="n1")
+    return journal
+
+
 def test_cancelled_ceiling_failure_replays_when_it_matches_the_reservation() -> None:
     """The G1 cancellation rule: a cancelled dispatch closes at the exact
-    reservation ceiling and must replay cleanly."""
-    journal = billed_failure_journal(model_failed(reason="cancelled"))
+    reservation ceiling and must replay cleanly (runtime event shape)."""
+    journal = cancelled_journal(model_failed(reason="cancelled"))
     journal.add(
         finished(
             "failed",
-            reason="n1: backend_error",
+            reason="n1: cancelled",
             calls=1,
             input_tokens=10,
             output_tokens=90,
@@ -654,6 +668,41 @@ def test_cancelled_ceiling_failure_replays_when_it_matches_the_reservation() -> 
     )
     view = fold_envelopes(journal.envelopes)
     assert view.total_cost_microusd == 10
+    assert view.nodes["n1"].reason == "cancelled"
+
+
+def test_cancelled_model_failed_must_claim_ceiling_source() -> None:
+    """A fabricated cancellation claiming provider-reported zeros must not
+    replay: the runtime rule always closes cancellations at the ceiling."""
+    journal = cancelled_journal(
+        model_failed(
+            reason="cancelled",
+            billed_input=0,
+            billed_output=0,
+            billed_cost=0,
+            usage_source="provider",
+        )
+    )
+    with pytest.raises(ReplayError, match='must carry usage_source "ceiling"'):
+        fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_cancelled_node_with_dangling_dispatch_must_not_replay() -> None:
+    """A cancelled node whose dispatch was never closed silently dropped a
+    possibly billed call; replay must fail closed."""
+    journal = cancelled_journal(None)
+    journal.add(
+        finished(
+            "failed",
+            reason="n1: cancelled",
+            calls=0,
+            input_tokens=0,
+            output_tokens=0,
+            cost_microusd=0,
+        )
+    )
+    with pytest.raises(ReplayError, match="dispatch is still open"):
+        fold_envelopes(journal.envelopes)
 
 
 def test_mixed_usage_source_is_accepted_without_reservation_equality() -> None:

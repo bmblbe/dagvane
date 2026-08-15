@@ -153,6 +153,40 @@ variable, an invalid profile, or a missing `live` extra is a usage error
 are opt-in only (`DAGVANE_LIVE_TESTS=1` + `DAGVANE_LIVE_PROFILE`), skipped by
 default, and the default test suite performs no network I/O.
 
+## Autonomous developer (workspace mode)
+
+Run Dagvane from any Git project directory. Every command starts, performs
+bounded work (progress on stderr), persists durable state under `.dagvane/`
+(self-Git-ignored), prints the final result to stdout, and exits — no REPL,
+no daemon. Conversations, goals, and run state are Dagvane-owned; losing a
+provider-native session loses nothing.
+
+```bash
+cd ~/my-project
+dagvane chat "Analyze the current repository. Do not modify anything."
+dagvane chat "For the demo these capabilities are mandatory: ..."
+dagvane conversations list          # also: show <id> · current · use <id>
+dagvane config list                 # also: get <key> · set <key> <value> · edit
+
+dagvane goal prepare --from-conversation current --name my-demo
+dagvane goal show my-demo           # owner reviews the frozen contract draft
+dagvane goal approve my-demo        # freezes the contract by hash
+dagvane goal run my-demo            # autonomous foreground loop (hours)
+dagvane goal resume my-demo         # continue after any crash/restart
+dagvane goal cancel my-demo
+```
+
+`goal run` iterates a fixed deterministic workflow: evaluate objective
+acceptance checks → route cheap-first (deterministic tiers LOCAL → CHEAP →
+STANDARD → STRONG → CRITICAL, with attempt escalation) → one writer
+implements in a candidate Git worktree (`codex exec` by default, Ollama for
+bounded local analysis when capable) → deterministic verification commands →
+independent review when the change is substantial → BLOCKER/MAJOR
+remediation → evidence-based terminal status (`achieved` / `blocked` /
+`budget_exhausted` / `cancelled`). Anti-runaway wall-clock/call/attempt caps
+come from the frozen contract. Nothing is pushed or merged — integration
+stays owner authority.
+
 ## Durable run layout
 
 Each run lives under `.dagvane/runs/<run-id>/` in the working directory:

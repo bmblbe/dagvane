@@ -46,7 +46,7 @@ from dagvane.domain.models import (
     RunStatus,
     SpecError,
 )
-from dagvane.domain.secrets import SecretScrubber
+from dagvane.domain.secrets import SecretScrubber, process_scrubber
 from dagvane.ports.backend import ChatBackend
 from dagvane.protocol.documents import load_fixture_file, load_task_file
 from dagvane.protocol.frames import canonical_json_bytes
@@ -197,7 +197,7 @@ def _build_live_backends(
     optional dependency as a usage error before any run state exists.
     """
     backends: dict[str, ChatBackend] = {}
-    scrubber = SecretScrubber()
+    scrubber = process_scrubber()
     for connection_id, connection in sorted(profile.used_connections().items()):
         value = os.environ.get(connection.credential_env)
         if not value:

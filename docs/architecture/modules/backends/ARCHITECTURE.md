@@ -81,12 +81,16 @@ any run state is created.
 5. Credential values never appear in events, artifacts, manifests, reports,
    errors, or logs. One process-wide, in-memory `SecretScrubber`
    (`domain/secrets.py`) holds every configured credential value ephemerally;
-   adapters scrub **all** provider-derived content — error text, successful
-   response content, model names, provider request ids — before it can be
-   truncated, persisted, or forwarded to another provider, and the executor
-   reuses the same scrubber on durable failure messages (defense in depth).
-   Scrubbing covers the raw value plus its `unicode_escape`, JSON-escaped,
-   and `repr()` renderings, and always runs before truncation.
+   adapters and the executor **default to that shared registry** (an enforced
+   invariant, not a wiring convention) and scrub **all** provider-derived
+   content — error text, successful response content, model names, provider
+   request ids — before it can be truncated, persisted, or forwarded to
+   another provider. Scrubbing covers the closure of `unicode_escape`,
+   JSON-escaped, and `repr()` renderings up to two nesting levels
+   (JSON-in-JSON reflections) and repeats passes until the text is stable. A
+   credential whose renderings overlap the replacement marker is refused at
+   registration — the marker can never mask or reconstruct a registered
+   secret, so a literal secret-byte scan of durable state stays sound.
 6. Cancellation propagates (adapters never swallow `CancelledError`), but a
    dispatch that has entered the ambiguous potentially-sent state is closed
    durably first: the worker commits the reservation ceiling and emits
@@ -149,7 +153,20 @@ any run state is created.
 `PoolTimeout` is pre-send: the locked httpx/httpcore stack raises it while
 waiting to *acquire* a connection, before the request is physically sent
 (httpcore `AsyncConnectionPool.handle_async_request` awaits
-`wait_for_connection()` first). It is therefore never billed.
+`wait_for_connection()` first). It is therefore never billed. The adapter's
+`asyncio` watchdog runs a fixed grace *behind* the transport's own timers so
+those precise pre-send classifications are never masked by an equal outer
+deadline; the watchdog remains a backstop for a wedged transport only.
+
+A failure response that itself reports usage (an HTTP error body or a
+status-bearing SDK exception body) carries what the provider may bill: the
+adapters parse it best-effort and attach it as partial `usage`, so a known
+component is never discarded merely because the response failed.
+
+Replay enforces the cancellation rule: `model.failed(reason="cancelled")`
+must claim `usage_source="ceiling"` (and therefore match its dispatch
+reservation exactly), and a `node.failed(reason="cancelled")` may not leave
+that node's dispatch open.
 
 All map to `node.failed: backend_error` at the node level, preserving the G0
 failure taxonomy — except cancellation, which maps to `node.failed:

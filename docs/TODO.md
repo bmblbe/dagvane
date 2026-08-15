@@ -16,6 +16,7 @@
 | G1 | Accepted на `70e1e5f2ebfc64b90275da424f5f4f4184fbf5de` |
 | Autonomous Developer | **REVISE — 4 BLOCKER + 7 MAJOR** |
 | Committed suite на baseline | `359 passed, 1 skipped`; Ruff clean; mypy strict clean |
+| Documentation reset | Accepted `732a007b2c0e2421177eb8b1ffd63301c3b511eb`; `364 passed, 1 skipped`; Ruff/mypy clean |
 | MilHRMS | Відкладено до повного RC1 за owner decision |
 
 Review `324f6c5…` був exact-SHA adversarial review, а не переказом Claude
@@ -56,13 +57,12 @@ Priority означає порядок усередині recovery, а не пр
 
 | ID | Priority | Status | Outcome |
 |---|---:|---|---|
-| `DOC-001` | P0 | `VERIFY` | Замінити суперечливі active docs одним українським каноном, архівувати старі й зафіксувати чесний stop-gate. |
+| `DOC-001` | P0 | `DONE` | Замінити суперечливі active docs одним українським каноном, архівувати старі й зафіксувати чесний stop-gate. |
 
-Три незалежні read-only reviews робочого дерева мають zero BLOCKER/MAJOR.
-`DOC-001` стає `DONE` після docs-only exact SHA, повторних
-link/stale-claim/full Python gates і підтвердження нульового diff у accepted
-ADR/history. Наступна implementation task після нього — **R1-A/SEC-001**, не
-всі findings одразу.
+`DOC-001` прийнятий на exact SHA `732a007…`: три незалежні read-only reviews
+мають zero BLOCKER/MAJOR, link/stale-claim/full Python gates green, accepted
+ADR/history unchanged. Активної code task ще немає. Наступний unblocked stage
+— **R1-A/SEC-001** і лише він, не всі findings одразу.
 
 ## Findings overview
 

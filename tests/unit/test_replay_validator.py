@@ -618,3 +618,26 @@ def test_node_completed_after_model_failed_is_rejected() -> None:
     journal.add(NodeCompleted(output_sha256=OUT_SHA), node_id="n1")
     with pytest.raises(ReplayError):
         fold_envelopes(journal.envelopes, require_terminal=False)
+
+
+def test_model_completed_rejects_negative_usage_and_cost() -> None:
+    journal = Journal()
+    journal.add(created(1))
+    journal.add(NodeStarted(role="proposer", route_id="fake/x"), node_id="n1")
+    journal.add(artifact(REQ_SHA), node_id="n1")
+    journal.add(artifact(OUT_SHA, role="proposer"), node_id="n1")
+    journal.add(dispatched(), node_id="n1", operation_id="op-1", call_id="call-1")
+    journal.add(
+        ModelCompleted(
+            model="fake-x",
+            input_tokens=-1_000_000,
+            output_tokens=5,
+            cost_microusd=3,
+            output_sha256=OUT_SHA,
+        ),
+        node_id="n1",
+        operation_id="op-1",
+        call_id="call-1",
+    )
+    with pytest.raises(ReplayError, match="negative usage or cost"):
+        fold_envelopes(journal.envelopes, require_terminal=False)

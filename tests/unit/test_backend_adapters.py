@@ -380,3 +380,123 @@ def test_compat_missing_httpx_is_a_usage_error() -> None:
     )
     with pytest.raises(SpecError, match="live"):
         backend.ensure_ready()
+
+
+# ---------------------------------------------------------------------------
+# Adversarial-review regression tests (G1 review round 1)
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_2xx_bearing_exception_is_billed_protocol_failure() -> None:
+    """An SDK exception carrying a 2xx status means a delivered-but-unusable
+    response: the provider processed the call, so it bills at the ceiling."""
+    client = FakeAnthropicClient(error=FakeStatusError(200, "malformed body"))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(anthropic_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "protocol"
+    assert excinfo.value.billed is True
+
+
+def test_redaction_covers_escaped_credential_forms() -> None:
+    """Transport libraries repr() header values; an escaped key must not leak."""
+    weird_key = "sk-bad\nkey"
+    escaped = weird_key.encode("unicode_escape").decode("ascii")
+    client = FakeAnthropicClient(error=FakeStatusError(500, f"illegal header {escaped}"))
+    backend = AnthropicBackend(
+        connection_id="anthro",
+        api_key=weird_key,
+        timeout_seconds=30,
+        monotonic=SteppingMonotonic(),
+        client_factory=lambda: client,
+    )
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(backend.complete(REQUEST))
+    message = str(excinfo.value)
+    assert weird_key not in message
+    assert escaped not in message
+    assert "[redacted]" in message
+
+
+def test_adapter_error_messages_are_bounded() -> None:
+    """Journal frames are capped at 1 MiB; provider error text must be bounded
+    long before that."""
+    client = FakeAnthropicClient(error=FakeStatusError(500, "x" * 2_000_000))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(anthropic_backend(client).complete(REQUEST))
+    assert len(str(excinfo.value)) < 3000
+    assert "truncated" in str(excinfo.value)
+
+
+def test_compat_pre_send_connection_failure_is_not_billed() -> None:
+    """A ConnectError proves the request never left this machine."""
+
+    class ConnectError(Exception):
+        pass
+
+    client = FakeHttpClient(error=ConnectError("dns failure"))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "connection"
+    assert excinfo.value.billed is False
+
+
+def test_compat_read_timeout_is_billed_timeout() -> None:
+    class ReadTimeout(Exception):
+        pass
+
+    client = FakeHttpClient(error=ReadTimeout("read timed out"))
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(compat_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "timeout"
+    assert excinfo.value.billed is True
+
+
+def test_anthropic_pre_send_cause_is_not_billed() -> None:
+    class ConnectError(Exception):
+        pass
+
+    sdk_error = RuntimeError("connection error")
+    sdk_error.__cause__ = ConnectError("refused")
+    client = FakeAnthropicClient(error=sdk_error)
+    with pytest.raises(BackendDispatchError) as excinfo:
+        asyncio.run(anthropic_backend(client).complete(REQUEST))
+    assert excinfo.value.kind == "connection"
+    assert excinfo.value.billed is False
+
+
+def test_compat_max_tokens_field_is_configurable() -> None:
+    client = FakeHttpClient(response=FakeHttpResponse(body=compat_body()))
+    backend = OpenAICompatBackend(
+        connection_id="compat",
+        base_url="https://api.example.test/v1",
+        api_key=API_KEY,
+        timeout_seconds=30,
+        max_tokens_field="max_completion_tokens",
+        monotonic=SteppingMonotonic(),
+        client_factory=lambda: client,
+    )
+    asyncio.run(backend.complete(REQUEST))
+    [(_, payload)] = client.posts
+    assert payload["max_completion_tokens"] == 64
+    assert "max_tokens" not in payload
+
+
+def test_ensure_ready_with_injected_client_needs_no_dependency() -> None:
+    """ensure_ready only checks importability; a factory bypasses it entirely."""
+    client = FakeAnthropicClient(result=anthropic_message())
+    anthropic_backend(client).ensure_ready()  # must not raise
+    compat_backend(FakeHttpClient(response=FakeHttpResponse(body=compat_body()))).ensure_ready()
+
+
+def test_aclose_releases_the_constructed_client() -> None:
+    closed = []
+
+    class ClosingClient(FakeHttpClient):
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    client = ClosingClient(response=FakeHttpResponse(body=compat_body()))
+    backend = compat_backend(client)
+    asyncio.run(backend.complete(REQUEST))
+    asyncio.run(backend.aclose())
+    assert closed == [True]

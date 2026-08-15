@@ -300,6 +300,14 @@ def fold_envelopes(
                         f"model.completed for {node_id!r} references unwritten "
                         f"output artifact {payload.output_sha256!r}"
                     )
+                if (
+                    payload.input_tokens < 0
+                    or payload.output_tokens < 0
+                    or payload.cost_microusd < 0
+                ):
+                    raise ReplayError(
+                        f"model.completed for {node_id!r} carries negative usage or cost"
+                    )
                 causal.last_output_sha[node_id] = payload.output_sha256
                 node.calls += 1
                 node.input_tokens += payload.input_tokens

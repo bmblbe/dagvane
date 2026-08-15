@@ -21,6 +21,7 @@ from graphlib import CycleError, TopologicalSorter
 from dagvane import __version__
 from dagvane.application.replay import fold_envelopes, rebuild_report
 from dagvane.domain.models import (
+    DISPATCH_KIND_PROTOCOL,
     ENTRY_KIND_PROPOSAL,
     ENTRY_KIND_REVIEW,
     ENTRY_KIND_TASK,
@@ -96,6 +97,18 @@ from dagvane.protocol.profiles import COUNCIL_ROLE_SLOTS, ProfileSpec
 FrameSink = Callable[[bytes, EventEnvelope], None]
 
 COUNCIL_PLAN_VERSION = 1
+
+# Journaled failure text must never grow a frame toward the 1 MiB protocol
+# limit; adapters bound their messages at ~2000 chars, this is defense in
+# depth for every other error source.
+_MAX_EVENT_MESSAGE_CHARS = 4000
+
+
+def _bound_event_message(message: str) -> str:
+    if len(message) <= _MAX_EVENT_MESSAGE_CHARS:
+        return message
+    over = len(message) - _MAX_EVENT_MESSAGE_CHARS
+    return message[:_MAX_EVENT_MESSAGE_CHARS] + f"... [truncated {over} chars]"
 
 # Pinned fake-route pricing (micro-USD per million tokens) and limits.
 _FAKE_PRICING = Pricing(input_microusd_per_mtok=3_000_000, output_microusd_per_mtok=15_000_000)
@@ -837,7 +850,7 @@ class OneShotModelWorker:
             self._emit(
                 ModelFailed(
                     reason=exc.kind,
-                    message=str(exc),
+                    message=_bound_event_message(str(exc)),
                     billed_input_tokens=billed_usage.input_tokens,
                     billed_output_tokens=billed_usage.output_tokens,
                     billed_cost_microusd=billed_cost,
@@ -858,11 +871,56 @@ class OneShotModelWorker:
         if result.usage.output_tokens > route.max_output_tokens:
             # A backend reporting more output than the request permitted violates
             # the backend contract; normalize it instead of trusting the claim.
-            self._ledger.release(reservation)
-            raise BackendError(
+            message = (
                 f"backend reported {result.usage.output_tokens} output tokens, "
                 f"above the route limit {route.max_output_tokens}"
             )
+            if result.receipt is None:
+                # Fake/test backends bill nothing (the G0 fake-billing rule).
+                self._ledger.release(reservation)
+                raise BackendError(message)
+            # A live provider processed — and billed — this call: commit the
+            # reported actuals honestly, persist the evidence and the receipt,
+            # and close the dispatch with a durable model.failed.
+            over_cost = dispatch_cost_microusd(
+                result.usage.input_tokens, result.usage.output_tokens, route.pricing
+            )
+            self._ledger.commit(reservation, result.usage, over_cost)
+            over_output_ref = self._artifacts.put(
+                result.text.encode("utf-8"), media_type="text/plain", role=node.role
+            )
+            self._emit(
+                ArtifactWritten(
+                    sha256=over_output_ref.sha256,
+                    size=over_output_ref.size,
+                    media_type=over_output_ref.media_type,
+                    role=over_output_ref.role,
+                ),
+                node_id=node.node_id,
+                attempt=attempt.index,
+            )
+            self._emit_receipt(
+                node=node, attempt=attempt, route=route, receipt=result.receipt,
+                request_sha256=request_ref.sha256,
+                response_sha256=over_output_ref.sha256,
+                usage=result.usage, cost_microusd=over_cost,
+                error_kind=DISPATCH_KIND_PROTOCOL, usage_source=USAGE_SOURCE_PROVIDER,
+            )
+            self._emit(
+                ModelFailed(
+                    reason=DISPATCH_KIND_PROTOCOL,
+                    message=message,
+                    billed_input_tokens=result.usage.input_tokens,
+                    billed_output_tokens=result.usage.output_tokens,
+                    billed_cost_microusd=over_cost,
+                    usage_source=USAGE_SOURCE_PROVIDER,
+                ),
+                node_id=node.node_id,
+                attempt=attempt.index,
+                operation_id=operation_id,
+                call_id=call_id,
+            )
+            raise BackendError(message)
 
         cost = dispatch_cost_microusd(
             result.usage.input_tokens, result.usage.output_tokens, route.pricing
@@ -1051,7 +1109,7 @@ class RunExecutor:
 
     def _fail_node(self, node: PlanNode, attempt: Attempt, reason: str, message: str) -> None:
         self._emit(
-            NodeFailed(reason=reason, message=message),
+            NodeFailed(reason=reason, message=_bound_event_message(message)),
             node_id=node.node_id,
             attempt=attempt.index,
         )
@@ -1092,6 +1150,21 @@ class RunExecutor:
                 # Durable storage failed: the run must not fabricate terminal
                 # state on a store that just failed a write. Abort honestly.
                 raise
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # Genuine cooperative cancellation: propagate.
+                    raise
+                # A backend raised CancelledError without any cancel request
+                # (e.g. a leaked cancel scope). Swallowing it silently would
+                # end this task as "cancelled", leaving the node non-terminal
+                # in the journal under a completed run — fail it durably.
+                self._fail_node(
+                    node,
+                    attempt,
+                    REASON_UNEXPECTED_ERROR,
+                    "backend raised CancelledError without a cancellation request",
+                )
             except Exception as exc:
                 # Unexpected worker/runtime failure: durable failed-node
                 # semantics instead of an abandoned, non-terminal run.

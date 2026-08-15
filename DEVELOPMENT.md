@@ -142,14 +142,21 @@ dependency-failed nodes legally go `pending → failed` without ever starting.
    above its configured caps, and replay independently rejects such journals.
 
 A backend claiming more output tokens than the route's `max_output_tokens`
-violates its contract and is normalized to a `backend_error` billed at zero.
-Live adapters raise `BackendDispatchError` with an explicit `billed` flag:
-non-billed failures (auth, rate limit, invalid request) release their
-reservation exactly like G0; billed failures (timeout, 5xx, lost connection,
-missing usage) are committed — provider-reported actuals when available,
-otherwise the full reservation ceiling — and journaled as `model.failed`.
-A provider that reports no usage cannot participate in a budgeted run
-(`usage_missing`, billed at ceiling).
+violates its contract and is normalized to a `backend_error`. For the fake
+backend (no receipt) the reservation is released — the G0 fake-billing rule.
+For a **live** backend the provider demonstrably processed the call, so the
+reported actuals are committed, the response and receipt are persisted, and
+the dispatch closes with `model.failed(reason="protocol",
+usage_source="provider")`. More generally, live adapters raise
+`BackendDispatchError` with an explicit `billed` flag: non-billed failures
+(auth, rate limit, invalid request, provably pre-send connection errors)
+release their reservation exactly like G0; billed failures (timeout, 5xx,
+2xx-bearing exceptions, ambiguous connection loss, missing usage) are
+committed — provider-reported actuals when available, otherwise the full
+reservation ceiling — and journaled as `model.failed`. A provider that
+reports no usage cannot participate in a budgeted run (`usage_missing`,
+billed at ceiling). All journaled failure text is bounded far below the
+1 MiB frame limit.
 
 ## 8. Failure taxonomy
 

@@ -389,3 +389,93 @@ def test_cancelled_dispatch_releases_its_reservation() -> None:
     # max_calls=1: the slot is free again only if cancellation released it.
     reservation = ledger.reserve(tokens=10, cost_microusd=10)
     assert reservation.calls == 1
+
+
+def test_overlimit_live_output_is_committed_honestly(tmp_path: Path) -> None:
+    """A 200 response whose reported output exceeds the route cap is a billed
+    protocol failure: actuals committed, receipt + model.failed journaled."""
+
+    class OverLimitHttpClient:
+        async def post(self, url: str, json: dict[str, object]) -> object:
+            model = str(json["model"])
+            body = {
+                "id": f"cmpl-{model}",
+                "model": model,
+                "choices": [{"message": {"role": "assistant", "content": "way too much"}}],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 9000},
+            }
+            return SimpleNamespace(status_code=200, text="", json=lambda: body)
+
+    anthro = ScriptedAnthropicClient(
+        {"anthro-model": "text", "anthro-judge": DECISION_TEXT}
+    )
+    result, run_dir = run_live(tmp_path, build_backends(anthro, OverLimitHttpClient()))
+
+    assert result.status is RunStatus.FAILED
+    events = journal_events(run_dir)
+    failed = [e for e in events if e["type"] == "model.failed"]
+    assert len(failed) == 1
+    data = failed[0]["data"]
+    assert data["reason"] == "protocol"
+    assert data["usage_source"] == "provider"
+    assert data["billed_input_tokens"] == 30
+    assert data["billed_output_tokens"] == 9000
+
+    committed = result.report_doc["budget"]["committed"]
+    assert committed["output_tokens"] >= 9000  # actuals, not zero
+    assert committed["cost_microusd"] >= data["billed_cost_microusd"]
+
+    receipts = [
+        e for e in events if e["type"] == "artifact.written" and e["data"]["role"] == "receipt"
+    ]
+    protocol_receipts = []
+    for event in receipts:
+        doc = json.loads((run_dir / "artifacts" / event["data"]["sha256"]).read_bytes())
+        if doc["error_kind"] == "protocol":
+            protocol_receipts.append(doc)
+    assert len(protocol_receipts) == 1
+    assert protocol_receipts[0]["response_sha256"] is not None
+    node_failed = [e for e in events if e["type"] == "node.failed"]
+    assert any(e["data"]["reason"] == "backend_error" for e in node_failed)
+
+
+def test_spontaneous_cancelled_error_fails_the_node_durably(tmp_path: Path) -> None:
+    """A backend leaking CancelledError without a cancel request must not
+    leave a non-terminal node inside a terminal journal."""
+
+    class LeakyCancelClient:
+        def __init__(self, texts: dict[str, str]) -> None:
+            self._texts = texts
+            self.messages = SimpleNamespace(create=self._create)
+
+        async def _create(self, **kwargs: Any) -> object:
+            model = kwargs["model"]
+            if model == "anthro-judge":
+                raise asyncio.CancelledError()
+            text = self._texts[model]
+            return SimpleNamespace(
+                id=f"msg-{model}",
+                model=model,
+                content=[SimpleNamespace(type="text", text=text)],
+                usage=SimpleNamespace(input_tokens=20, output_tokens=10),
+            )
+
+    anthro = LeakyCancelClient({"anthro-model": "text"})
+    compat = ScriptedHttpClient({"compat-model": "text"})
+    result, run_dir = run_live(tmp_path, build_backends(anthro, compat))
+
+    assert result.status is RunStatus.FAILED
+    events = journal_events(run_dir)
+    node_failed = {
+        e["node_id"]: e["data"]["reason"] for e in events if e["type"] == "node.failed"
+    }
+    assert node_failed.get("judge") == "unexpected_error"
+    assert events[-1]["type"] == "run.finished"
+    assert events[-1]["data"]["status"] == "failed"
+
+    # The journal replays cleanly — no non-terminal node under a terminal run.
+    from dagvane.application.replay import fold_frames
+
+    frames = (run_dir / "events.jsonl").read_bytes().splitlines(keepends=True)
+    view = fold_frames(iter(frames))
+    assert view.status is RunStatus.FAILED

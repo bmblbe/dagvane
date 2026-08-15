@@ -90,10 +90,13 @@ any run state is created.
 
 - New payload `model.failed` `{reason, message, billed_input_tokens,
   billed_output_tokens, billed_cost_microusd, usage_source}` with
-  `usage_source ∈ {"provider","ceiling","none"}`. It closes its open dispatch
-  and accumulates billed amounts into node/run totals; `run.finished` totals
-  now equal `Σ model.completed + Σ model.failed`. Fixture-mode journals never
-  contain it (FakeBackend failures keep exact G0 semantics).
+  `usage_source ∈ {"provider","ceiling"}` (billed dispatches only; non-billed
+  failures emit no `model.failed`). It closes its open dispatch and
+  accumulates billed amounts into node/run totals; `run.finished` totals now
+  equal `Σ model.completed + Σ model.failed`. Every journaled failure message
+  is bounded (adapters ≈2000 chars, engine defense-in-depth 4000) so a frame
+  can never approach the 1 MiB protocol limit. Fixture-mode journals never
+  contain `model.failed` (FakeBackend failures keep exact G0 semantics).
 - Receipt artifacts: per **live** dispatch, an `artifact.written` with
   `role="receipt"` (content: backend kind, connection id, model, route id +
   fingerprint, request/response artifact hashes, provider-reported usage,
@@ -112,14 +115,36 @@ any run state is created.
 | HTTP 401/403/404, invalid request | `BackendDispatchError(kind="auth"/"api", billed=False)` | released |
 | HTTP 429 | `kind="rate_limit", billed=False` | released |
 | HTTP 5xx | `kind="api", billed=True` | ceiling |
-| timeout | `kind="timeout", billed=True` | ceiling |
-| transport/connection error after send | `kind="connection", billed=True` | ceiling |
+| exception carrying a 2xx/3xx status (delivered but unusable response) | `kind="protocol", billed=True` | ceiling |
+| timeout (incl. read/write/pool timeout after send) | `kind="timeout", billed=True` | ceiling |
+| provably pre-send failure (connect error/timeout, DNS, illegal URL/proxy) | `kind="connection", billed=False` | released |
+| other transport/connection error (may have been sent) | `kind="connection", billed=True` | ceiling |
 | malformed response body | `kind="protocol", billed=True` | ceiling |
 | usage absent in response | `kind="usage_missing", billed=True` | ceiling |
 | provider reported usage on failure | same kinds, `usage` attached | actuals (`usage_source="provider"`) |
+| 200 response whose reported output exceeds the route's `max_output_tokens` | live: billed protocol failure — actuals committed, output + receipt persisted, `model.failed(reason="protocol", usage_source="provider")`; fake (`receipt=None`): released (G0 fake-billing rule) | actuals / released |
 
 All map to `node.failed: backend_error` at the node level, preserving the G0
 failure taxonomy.
+
+Additional adapter rules:
+
+- Credential values are validated at the composition root (printable ASCII
+  only — a value that cannot form a legal HTTP header is refused before any
+  run state); adapter redaction also covers the escaped `repr()` form of the
+  key that transport libraries embed in error text.
+- `ensure_ready()` verifies importability of the optional dependency only;
+  the transport client is constructed lazily inside the running event loop,
+  and `aclose()` releases it. An adapter instance is scoped to one event
+  loop / one run.
+- Profile options: `max_tokens_field = "max_tokens" | "max_completion_tokens"`
+  (openai_compat only; reasoning-era OpenAI endpoints reject `max_tokens`);
+  `allow_insecure_http = true` is required to send a Bearer credential over
+  cleartext `http://` to a non-loopback host.
+- The schema deliberately does **not** force distinct routes for the two
+  proposer slots: single-route profiles are legitimate for smoke tests. The
+  Round 4 "two vendor families" requirement applies to the real dogfood
+  sign-off run, as policy, not schema.
 
 ## Acceptance criteria
 

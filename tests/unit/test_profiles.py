@@ -151,3 +151,51 @@ def test_malformed_profiles_are_rejected(mutation, match: str) -> None:  # type:
     mutated = mutation(HAPPY_PROFILE)
     with pytest.raises(SpecError, match=match):
         parse_profile(mutated.encode("utf-8"), source="test-profile")
+
+
+INSECURE_HTTP = HAPPY_PROFILE.replace(
+    'base_url = "https://api.example.test/v1"', 'base_url = "http://lan-host:11434/v1"'
+)
+
+
+def test_cleartext_http_to_remote_host_requires_explicit_opt_in() -> None:
+    with pytest.raises(SpecError, match="allow_insecure_http"):
+        parse_profile(INSECURE_HTTP.encode("utf-8"), source="test-profile")
+    opted_in = INSECURE_HTTP.replace(
+        'credential_env = "TEST_COMPAT_KEY"',
+        'credential_env = "TEST_COMPAT_KEY"\nallow_insecure_http = true',
+    )
+    profile = parse_profile(opted_in.encode("utf-8"), source="test-profile")
+    assert profile.connections["compat"].base_url == "http://lan-host:11434/v1"
+
+
+def test_cleartext_http_to_loopback_needs_no_opt_in() -> None:
+    for host in ("localhost:11434", "127.0.0.1:11434", "[::1]:11434"):
+        text = HAPPY_PROFILE.replace(
+            'base_url = "https://api.example.test/v1"', f'base_url = "http://{host}/v1"'
+        )
+        profile = parse_profile(text.encode("utf-8"), source="test-profile")
+        assert profile.connections["compat"].base_url == f"http://{host}/v1"
+
+
+def test_max_tokens_field_is_validated_and_defaulted() -> None:
+    profile = parse_profile(HAPPY_PROFILE.encode("utf-8"), source="test-profile")
+    assert profile.connections["compat"].max_tokens_field == "max_tokens"
+
+    with_field = HAPPY_PROFILE.replace(
+        'credential_env = "TEST_COMPAT_KEY"',
+        'credential_env = "TEST_COMPAT_KEY"\nmax_tokens_field = "max_completion_tokens"',
+    )
+    profile = parse_profile(with_field.encode("utf-8"), source="test-profile")
+    assert profile.connections["compat"].max_tokens_field == "max_completion_tokens"
+
+    bad_value = with_field.replace("max_completion_tokens", "output_budget")
+    with pytest.raises(SpecError, match="max_tokens_field"):
+        parse_profile(bad_value.encode("utf-8"), source="test-profile")
+
+    on_anthropic = HAPPY_PROFILE.replace(
+        'credential_env = "TEST_ANTHROPIC_KEY"',
+        'credential_env = "TEST_ANTHROPIC_KEY"\nmax_tokens_field = "max_tokens"',
+    )
+    with pytest.raises(SpecError, match="applies only to openai_compat"):
+        parse_profile(on_anthropic.encode("utf-8"), source="test-profile")

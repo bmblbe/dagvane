@@ -13,6 +13,8 @@ from collections.abc import Callable
 from typing import Any
 
 from dagvane.adapters.backends.common import (
+    POST_SEND_TIMEOUT_NAMES,
+    PRE_SEND_ERROR_NAMES,
     kind_for_status,
     optional_str,
     redact,
@@ -50,6 +52,7 @@ class OpenAICompatBackend:
         base_url: str,
         api_key: str,
         timeout_seconds: int,
+        max_tokens_field: str = "max_tokens",
         monotonic: Monotonic | None = None,
         client_factory: Callable[[], Any] | None = None,
     ) -> None:
@@ -57,13 +60,34 @@ class OpenAICompatBackend:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._max_tokens_field = max_tokens_field
         self._monotonic: Monotonic = monotonic if monotonic is not None else SystemMonotonic()
         self._client_factory = client_factory
         self._client: Any | None = None
 
     def ensure_ready(self) -> None:
-        """Build the client now: a missing dependency surfaces before any run state."""
-        self._get_client()
+        """Verify the optional dependency is importable — without constructing
+        the client, which must be born inside the running event loop."""
+        if self._client_factory is not None:
+            return
+        try:
+            import httpx  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise SpecError(
+                "httpx is not installed; "
+                "install the live extra: pip install 'dagvane[live]'"
+            ) from exc
+
+    async def aclose(self) -> None:
+        """Release transport resources. The adapter is single-event-loop scoped."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            aclose = getattr(client, "aclose", None)
+            if callable(aclose):
+                result = aclose()
+                if result is not None and hasattr(result, "__await__"):
+                    await result
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -109,7 +133,9 @@ class OpenAICompatBackend:
         url = self._base_url + "/chat/completions"
         payload: dict[str, object] = {
             "model": request.model,
-            "max_tokens": request.max_output_tokens,
+            # Reasoning-era OpenAI endpoints reject "max_tokens"; the profile's
+            # connection config selects the field name (default "max_tokens").
+            self._max_tokens_field: request.max_output_tokens,
             "messages": [
                 {"role": "system", "content": request.system},
                 {"role": "user", "content": request.user_text},
@@ -130,10 +156,18 @@ class OpenAICompatBackend:
                 receipt=self._receipt(started_ms, None),
             ) from exc
         except Exception as exc:
+            error_name = type(exc).__name__
+            if error_name in PRE_SEND_ERROR_NAMES:
+                # The request provably never reached the provider: not billed.
+                kind, billed = DISPATCH_KIND_CONNECTION, False
+            elif error_name in POST_SEND_TIMEOUT_NAMES:
+                kind, billed = DISPATCH_KIND_TIMEOUT, True
+            else:
+                kind, billed = DISPATCH_KIND_CONNECTION, True
             raise BackendDispatchError(
-                kind=DISPATCH_KIND_CONNECTION,
-                message=self._redact(f"{type(exc).__name__}: {exc}"),
-                billed=True,
+                kind=kind,
+                message=self._redact(f"{error_name}: {exc}"),
+                billed=billed,
                 receipt=self._receipt(started_ms, None),
             ) from exc
 

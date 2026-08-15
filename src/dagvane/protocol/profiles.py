@@ -35,8 +35,22 @@ COUNCIL_ROLE_SLOTS: tuple[str, ...] = (
 
 DEFAULT_TIMEOUT_SECONDS = 120
 
+# The OpenAI-compatible request field naming the output-token cap; reasoning-era
+# OpenAI endpoints reject "max_tokens" and require "max_completion_tokens".
+MAX_TOKENS_FIELDS: frozenset[str] = frozenset({"max_tokens", "max_completion_tokens"})
+DEFAULT_MAX_TOKENS_FIELD = "max_tokens"
+
 _PROFILE_KEYS = frozenset({"profile_version", "connections", "routes", "council"})
-_CONNECTION_KEYS = frozenset({"kind", "credential_env", "base_url", "timeout_seconds"})
+_CONNECTION_KEYS = frozenset(
+    {
+        "kind",
+        "credential_env",
+        "base_url",
+        "timeout_seconds",
+        "max_tokens_field",
+        "allow_insecure_http",
+    }
+)
 _ROUTE_KEYS = frozenset(
     {
         "connection",
@@ -57,6 +71,7 @@ class ConnectionSpec:
     credential_env: str
     base_url: str | None
     timeout_seconds: int
+    max_tokens_field: str = DEFAULT_MAX_TOKENS_FIELD
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +123,18 @@ def _reject_unknown_keys(obj: Mapping[str, object], allowed: frozenset[str], ctx
         raise SpecError(f"{ctx}: unknown keys {unknown!r}")
 
 
+def _is_loopback_host(base_url: str) -> bool:
+    """Best-effort loopback detection without urllib (banned in the engine)."""
+    rest = base_url.split("://", 1)[1]
+    host_port = rest.split("/", 1)[0].rsplit("@", 1)[-1]
+    if host_port.startswith("["):  # IPv6 literal
+        host = host_port[1:].split("]", 1)[0]
+    else:
+        host = host_port.split(":", 1)[0]
+    host = host.lower()
+    return host == "localhost" or host == "::1" or host.startswith("127.")
+
+
 def _parse_connection(connection_id: str, raw: object, ctx: str) -> ConnectionSpec:
     if not isinstance(raw, dict):
         raise SpecError(f"{ctx} must be a table")
@@ -123,15 +150,42 @@ def _parse_connection(connection_id: str, raw: object, ctx: str) -> ConnectionSp
             raise SpecError(f"{ctx}: base_url must start with http:// or https://")
     if kind == BACKEND_KIND_OPENAI_COMPAT and base_url is None:
         raise SpecError(f"{ctx}: base_url is required for kind {kind!r}")
+    allow_insecure_http = False
+    if "allow_insecure_http" in raw:
+        value = raw["allow_insecure_http"]
+        if not isinstance(value, bool):
+            raise SpecError(f"{ctx}: allow_insecure_http must be a boolean")
+        allow_insecure_http = value
+    if (
+        base_url is not None
+        and base_url.startswith("http://")
+        and not _is_loopback_host(base_url)
+        and not allow_insecure_http
+    ):
+        raise SpecError(
+            f"{ctx}: base_url uses cleartext http:// to a non-loopback host; "
+            "the Bearer credential would travel unencrypted. Set "
+            "allow_insecure_http = true only if you accept that."
+        )
     timeout_seconds = DEFAULT_TIMEOUT_SECONDS
     if "timeout_seconds" in raw:
         timeout_seconds = _req_int(raw, "timeout_seconds", ctx, minimum=1)
+    max_tokens_field = DEFAULT_MAX_TOKENS_FIELD
+    if "max_tokens_field" in raw:
+        if kind != BACKEND_KIND_OPENAI_COMPAT:
+            raise SpecError(f"{ctx}: max_tokens_field applies only to openai_compat")
+        max_tokens_field = _req_str(raw, "max_tokens_field", ctx)
+        if max_tokens_field not in MAX_TOKENS_FIELDS:
+            raise SpecError(
+                f"{ctx}: max_tokens_field must be one of {sorted(MAX_TOKENS_FIELDS)!r}"
+            )
     return ConnectionSpec(
         connection_id=connection_id,
         kind=kind,
         credential_env=credential_env,
         base_url=base_url,
         timeout_seconds=timeout_seconds,
+        max_tokens_field=max_tokens_field,
     )
 
 

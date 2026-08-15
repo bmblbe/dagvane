@@ -190,6 +190,16 @@ def _build_live_backends(profile: ProfileSpec) -> dict[str, ChatBackend]:
                 f"connection {connection_id!r} requires the credential environment "
                 f"variable {connection.credential_env!r}, which is not set"
             )
+        # A credential with whitespace or non-printable bytes cannot form a
+        # legal HTTP header; transport errors would then repr() the value in
+        # escaped form, dodging exact-match redaction. Refuse it up front
+        # (never echoing the value).
+        if not all(0x21 <= ord(ch) <= 0x7E for ch in value):
+            raise SpecError(
+                f"the value of {connection.credential_env!r} contains whitespace "
+                "or non-printable characters and cannot be used as an HTTP "
+                "credential"
+            )
         if connection.kind == BACKEND_KIND_ANTHROPIC:
             anthropic_backend = AnthropicBackend(
                 connection_id=connection_id,
@@ -207,6 +217,7 @@ def _build_live_backends(profile: ProfileSpec) -> dict[str, ChatBackend]:
                 base_url=base_url,
                 api_key=value,
                 timeout_seconds=connection.timeout_seconds,
+                max_tokens_field=connection.max_tokens_field,
             )
             compat_backend.ensure_ready()
             backends[connection_id] = compat_backend

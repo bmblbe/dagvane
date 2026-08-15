@@ -12,6 +12,8 @@ from collections.abc import Callable
 from typing import Any
 
 from dagvane.adapters.backends.common import (
+    POST_SEND_TIMEOUT_NAMES,
+    PRE_SEND_ERROR_NAMES,
     kind_for_status,
     optional_str,
     redact,
@@ -59,8 +61,28 @@ class AnthropicBackend:
         self._client: Any | None = None
 
     def ensure_ready(self) -> None:
-        """Build the client now: a missing SDK surfaces before any run state exists."""
-        self._get_client()
+        """Verify the optional SDK is importable — without constructing the
+        client, which must be born inside the running event loop."""
+        if self._client_factory is not None:
+            return
+        try:
+            import anthropic  # noqa: F401
+        except ModuleNotFoundError as exc:
+            raise SpecError(
+                "the Anthropic SDK is not installed; "
+                "install the live extra: pip install 'dagvane[live]'"
+            ) from exc
+
+    async def aclose(self) -> None:
+        """Release transport resources. The adapter is single-event-loop scoped."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                result = close()
+                if result is not None and hasattr(result, "__await__"):
+                    await result
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -105,7 +127,17 @@ class AnthropicBackend:
             return BackendDispatchError(
                 kind=kind, message=message, billed=billed, receipt=receipt
             )
-        # No HTTP status: the request may or may not have reached the provider.
+        # No HTTP status. The SDK wraps transport errors; when the underlying
+        # cause proves the request never left this machine, nothing was billed.
+        cause_name = type(exc.__cause__).__name__ if exc.__cause__ is not None else ""
+        if cause_name in PRE_SEND_ERROR_NAMES:
+            return BackendDispatchError(
+                kind=DISPATCH_KIND_CONNECTION, message=message, billed=False, receipt=receipt
+            )
+        if cause_name in POST_SEND_TIMEOUT_NAMES:
+            return BackendDispatchError(
+                kind=DISPATCH_KIND_TIMEOUT, message=message, billed=True, receipt=receipt
+            )
         return BackendDispatchError(
             kind=DISPATCH_KIND_CONNECTION, message=message, billed=True, receipt=receipt
         )

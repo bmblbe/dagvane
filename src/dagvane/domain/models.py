@@ -65,6 +65,56 @@ class BackendError(DagvaneError):
     """A chat backend failed to produce a result."""
 
 
+# Closed set of normalized live-dispatch failure kinds (G1).
+DISPATCH_KIND_AUTH = "auth"
+DISPATCH_KIND_API = "api"
+DISPATCH_KIND_RATE_LIMIT = "rate_limit"
+DISPATCH_KIND_TIMEOUT = "timeout"
+DISPATCH_KIND_CONNECTION = "connection"
+DISPATCH_KIND_PROTOCOL = "protocol"
+DISPATCH_KIND_USAGE_MISSING = "usage_missing"
+
+BACKEND_DISPATCH_KINDS: frozenset[str] = frozenset(
+    {
+        DISPATCH_KIND_AUTH,
+        DISPATCH_KIND_API,
+        DISPATCH_KIND_RATE_LIMIT,
+        DISPATCH_KIND_TIMEOUT,
+        DISPATCH_KIND_CONNECTION,
+        DISPATCH_KIND_PROTOCOL,
+        DISPATCH_KIND_USAGE_MISSING,
+    }
+)
+
+
+class BackendDispatchError(BackendError):
+    """A normalized live-dispatch failure with honest billing semantics.
+
+    ``billed=True`` means the provider may have processed (and billed) the
+    request — the caller must commit the dispatch against the budget instead
+    of releasing its reservation. ``usage`` carries provider-reported usage
+    for the failed call when the provider supplied it. Messages must already
+    be redacted by the adapter that raises this.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        message: str,
+        billed: bool,
+        usage: Usage | None = None,
+        receipt: InvocationReceipt | None = None,
+    ) -> None:
+        if kind not in BACKEND_DISPATCH_KINDS:
+            raise ValueError(f"unknown dispatch failure kind {kind!r}")
+        self.kind = kind
+        self.billed = billed
+        self.usage = usage
+        self.receipt = receipt
+        super().__init__(f"{kind}: {message}")
+
+
 class StorageError(DagvaneError):
     """Durable storage invariant violation (run dir, journal, artifacts)."""
 
@@ -201,6 +251,16 @@ class ModelRoute:
     backend: str
     pricing: Pricing
     max_output_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class InvocationReceipt:
+    """Physical-invocation provenance reported by a live backend adapter."""
+
+    backend_kind: str
+    connection_id: str
+    provider_request_id: str | None
+    latency_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +432,30 @@ class ModelCompleted:
     output_sha256: str
 
 
+# How a billed failed dispatch attributed its committed usage.
+USAGE_SOURCE_PROVIDER = "provider"  # provider reported real usage for the failure
+USAGE_SOURCE_CEILING = "ceiling"  # committed at the reservation ceiling
+USAGE_SOURCES: frozenset[str] = frozenset({USAGE_SOURCE_PROVIDER, USAGE_SOURCE_CEILING})
+
+
+@dataclass(frozen=True, slots=True)
+class ModelFailed:
+    """A billed dispatch failure (G1 live backends): closes its open dispatch.
+
+    Emitted only when the failed call was (possibly) billed by the provider;
+    the billed amounts are committed against the run budget. Non-billed
+    failures keep the G0 shape: released reservation, no ``model.failed``.
+    """
+
+    TYPE: ClassVar[str] = "model.failed"
+    reason: str  # a BACKEND_DISPATCH_KINDS member
+    message: str
+    billed_input_tokens: int
+    billed_output_tokens: int
+    billed_cost_microusd: int
+    usage_source: str  # a USAGE_SOURCES member
+
+
 @dataclass(frozen=True, slots=True)
 class NodeCompleted:
     TYPE: ClassVar[str] = "node.completed"
@@ -421,6 +505,7 @@ EventPayload = (
     | ArtifactWritten
     | ModelDispatched
     | ModelCompleted
+    | ModelFailed
     | NodeCompleted
     | NodeFailed
     | BudgetRejected
@@ -436,6 +521,7 @@ EVENT_REGISTRY: Mapping[str, type[EventPayload]] = {
         ArtifactWritten,
         ModelDispatched,
         ModelCompleted,
+        ModelFailed,
         NodeCompleted,
         NodeFailed,
         BudgetRejected,

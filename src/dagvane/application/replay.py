@@ -17,9 +17,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from dagvane.domain.models import (
+    BACKEND_DISPATCH_KINDS,
     NODE_FAILURE_REASONS,
     ROLE_JUDGE,
     RUN_TERMINAL_STATUSES,
+    USAGE_SOURCES,
     ArtifactWritten,
     Budget,
     BudgetRejected,
@@ -28,6 +30,7 @@ from dagvane.domain.models import (
     EventEnvelope,
     ModelCompleted,
     ModelDispatched,
+    ModelFailed,
     NodeCompleted,
     NodeFailed,
     NodeStarted,
@@ -132,7 +135,8 @@ def _check_terminal(
         or payload.cost_microusd != view.total_cost_microusd
     ):
         raise ReplayError(
-            "run.finished totals do not match accumulated model.completed usage"
+            "run.finished totals do not match accumulated "
+            "model.completed + billed model.failed usage"
         )
     if len(view.nodes) != causal.expected_nodes:
         raise ReplayError(
@@ -305,6 +309,51 @@ def fold_envelopes(
                 view.total_input_tokens += payload.input_tokens
                 view.total_output_tokens += payload.output_tokens
                 view.total_cost_microusd += payload.cost_microusd
+            elif isinstance(payload, ModelFailed):
+                node_id, node = _node_for(view, envelope)
+                if node.status is not NodeStatus.RUNNING:
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} while node is {node.status.value}"
+                    )
+                operation_id, call_id = envelope.operation_id, envelope.call_id
+                if operation_id is None or call_id is None:
+                    raise ReplayError(
+                        f"model.failed at seq {envelope.seq} requires "
+                        "operation_id and call_id"
+                    )
+                key = (node_id, operation_id, call_id)
+                if key not in causal.open_dispatches:
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} has no matching open "
+                        f"dispatch (operation {operation_id!r}, call {call_id!r})"
+                    )
+                causal.open_dispatches.remove(key)
+                if payload.reason not in BACKEND_DISPATCH_KINDS:
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} has unknown reason "
+                        f"{payload.reason!r}"
+                    )
+                if payload.usage_source not in USAGE_SOURCES:
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} has unknown usage_source "
+                        f"{payload.usage_source!r}"
+                    )
+                if (
+                    payload.billed_input_tokens < 0
+                    or payload.billed_output_tokens < 0
+                    or payload.billed_cost_microusd < 0
+                ):
+                    raise ReplayError(
+                        f"model.failed for {node_id!r} carries negative billed amounts"
+                    )
+                node.calls += 1
+                node.input_tokens += payload.billed_input_tokens
+                node.output_tokens += payload.billed_output_tokens
+                node.cost_microusd += payload.billed_cost_microusd
+                view.total_calls += 1
+                view.total_input_tokens += payload.billed_input_tokens
+                view.total_output_tokens += payload.billed_output_tokens
+                view.total_cost_microusd += payload.billed_cost_microusd
             elif isinstance(payload, NodeCompleted):
                 node_id, node = _node_for(view, envelope)
                 node.status = advance_node_status(node.status, NodeStatus.COMPLETED)

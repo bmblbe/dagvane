@@ -60,6 +60,7 @@ def test_registry_is_closed_and_consistent() -> None:
         "artifact.written",
         "model.dispatched",
         "model.completed",
+        "model.failed",
         "node.completed",
         "node.failed",
         "budget.rejected",

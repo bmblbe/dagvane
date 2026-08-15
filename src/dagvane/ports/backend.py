@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from dagvane.domain.models import Usage
+from dagvane.domain.models import InvocationReceipt, Usage
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +27,9 @@ class ChatResult:
     model: str
     text: str
     usage: Usage
+    # Live adapters attach physical-invocation provenance; fake/test backends
+    # leave it None, which keeps fixture-mode journals byte-identical to G0.
+    receipt: InvocationReceipt | None = None
 
 
 class ChatBackend(Protocol):

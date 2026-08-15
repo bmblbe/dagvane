@@ -7,6 +7,7 @@ time and identifiers by injection, which is what makes runs reproducible.
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -17,6 +18,12 @@ from dagvane.domain.models import SpecError
 class Clock(Protocol):
     def now_iso(self) -> str:
         """Current instant as ISO-8601 UTC with millisecond precision (``...Z``)."""
+        ...
+
+
+class Monotonic(Protocol):
+    def now_ms(self) -> int:
+        """A monotonic reading in milliseconds; only differences are meaningful."""
         ...
 
 
@@ -55,6 +62,24 @@ class FixedClock:
     def now_iso(self) -> str:
         value = format_iso_ms(self._current)
         self._current = self._current + self._step
+        return value
+
+
+class SystemMonotonic:
+    def now_ms(self) -> int:
+        return time.perf_counter_ns() // 1_000_000
+
+
+class SteppingMonotonic:
+    """Deterministic monotonic time: starts at 0, advances ``step_ms`` per reading."""
+
+    def __init__(self, step_ms: int = 1) -> None:
+        self._current = 0
+        self._step = step_ms
+
+    def now_ms(self) -> int:
+        value = self._current
+        self._current += self._step
         return value
 
 

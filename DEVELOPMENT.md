@@ -182,7 +182,7 @@ G0 deliberately contains **no** live providers, network access, shell/tools,
 Git/worktree management, external-agent adapters, dynamic Strategist, RAG,
 MCP/A2A, cost routing, or Qt implementation. Do not add them casually; each
 arrives at its own milestone in
-`docs/architecture/GREENFIELD_IMPLEMENTATION_SEQUENCE.md`.
+`docs/implementation/MASTER_PLAN.md`.
 
 Known, intentional G1 seams:
 

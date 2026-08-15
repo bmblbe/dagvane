@@ -63,7 +63,7 @@ uv sync --python 3.11 --extra dev --locked
 uv run pytest && uv run ruff check . && uv run mypy
 ```
 
-At the remediation candidate: **358 passed, 1 skipped** (opt-in live suite),
+At the remediation candidate: **359 passed, 1 skipped** (opt-in live suite),
 ruff clean, strict mypy clean, Python 3.11.15. The default suite is offline
 and provider-free (external agents are faked through the `command` runtime,
 and the test workspace configs explicitly disable the default real

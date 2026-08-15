@@ -45,12 +45,36 @@ def test_nested_json_reflection_is_not_recoverable() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["[redacted]", "redacted", "a", "ed]", "[red", "acted"],
-    ids=["marker-exact", "marker-word", "one-char-in-marker", "suffix", "prefix", "infix"],
+    [
+        "[redacted]",
+        "redacted",
+        "a",
+        "ed]",
+        "[red",
+        "acted",
+        # Boundary overlaps: a marker insertion abutting untouched text could
+        # regenerate these faster than scrub passes remove them (Codex R3
+        # probe: "]TOKEN123" against "]" + "TOKEN123" * N).
+        "]TOKEN123",
+        "d]TOKEN99",
+        "TOKEN99-ends[",
+    ],
+    ids=[
+        "marker-exact",
+        "marker-word",
+        "one-char-in-marker",
+        "suffix",
+        "prefix",
+        "infix",
+        "boundary-prefix",
+        "boundary-prefix-2",
+        "boundary-suffix",
+    ],
 )
 def test_credentials_overlapping_the_marker_are_refused(value: str) -> None:
-    """A credential whose bytes overlap the replacement marker cannot be
-    scrubbed reliably; it must be refused at the configuration boundary."""
+    """A credential whose bytes overlap the replacement marker — containment
+    or boundary overlap — cannot be scrubbed reliably; it must be refused at
+    the configuration boundary."""
     scrubber = SecretScrubber()
     with pytest.raises(SpecError, match="redaction marker"):
         scrubber.register(value)

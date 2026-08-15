@@ -160,8 +160,11 @@ deadline; the watchdog remains a backstop for a wedged transport only.
 
 A failure response that itself reports usage (an HTTP error body or a
 status-bearing SDK exception body) carries what the provider may bill: the
-adapters parse it best-effort and attach it as partial `usage`, so a known
-component is never discarded merely because the response failed.
+adapters parse it best-effort and attach it as partial `usage`, and the
+worker commits it — even for nominally non-billed classifications (4xx,
+429): only a failure that is both non-billed *and* usage-free releases its
+reservation. A known component is never discarded merely because the
+response failed.
 
 Replay enforces the cancellation rule: `model.failed(reason="cancelled")`
 must claim `usage_source="ceiling"` (and therefore match its dispatch

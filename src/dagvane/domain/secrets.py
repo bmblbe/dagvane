@@ -70,17 +70,34 @@ class SecretScrubber:
     def __repr__(self) -> str:  # never expose values, even in debug output
         return f"SecretScrubber(secrets={len(self._values)})"
 
+    @classmethod
+    def _overlaps_marker(cls, rendering: str) -> bool:
+        """True when the rendering could survive or regenerate around the
+        marker: containment either way, or a boundary overlap (a rendering
+        prefix equal to a marker suffix, or a rendering suffix equal to a
+        marker prefix). Boundary overlaps matter because an inserted marker
+        abutting untouched text could otherwise recreate the rendering
+        faster than scrub passes remove it.
+        """
+        marker = cls._REPLACEMENT
+        if rendering in marker or marker in rendering:
+            return True
+        for k in range(1, min(len(rendering), len(marker)) + 1):
+            if marker.endswith(rendering[:k]) or marker.startswith(rendering[-k:]):
+                return True
+        return False
+
     def register(self, value: str) -> None:
         """Register one credential value (idempotent). Empty values are ignored.
 
-        A value whose renderings overlap the replacement marker is refused:
-        replacing such a secret could leave (or re-insert) its exact bytes,
-        defeating a literal secret-byte scan.
+        A value whose renderings overlap the replacement marker — containment
+        or boundary overlap — is refused: replacing such a secret could leave
+        or re-insert its exact bytes, defeating a literal secret-byte scan.
         """
         if not value or value in self._values:
             return
         for rendering in _renderings(value):
-            if rendering in self._REPLACEMENT or self._REPLACEMENT in rendering:
+            if self._overlaps_marker(rendering):
                 raise SpecError(
                     "credential value overlaps the redaction marker and cannot "
                     "be scrubbed reliably; choose a different credential"

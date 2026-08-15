@@ -852,10 +852,13 @@ class OneShotModelWorker:
             raise
         except BackendDispatchError as exc:
             # A normalized live-dispatch failure. If the provider may have
-            # billed the call, commit it honestly (provider-reported actuals
-            # when available, otherwise the reservation ceiling) and close the
-            # dispatch with a durable model.failed event.
-            if not exc.billed:
+            # billed the call — or *reported usage* for it, which is the
+            # provider stating what it processed — commit it honestly
+            # (reported actuals when available, otherwise the reservation
+            # ceiling) and close the dispatch with a durable model.failed.
+            # Only a failure that is both non-billed by classification and
+            # carries no reported usage releases its reservation.
+            if not exc.billed and exc.usage is None:
                 self._ledger.release(reservation)
                 if exc.receipt is not None:
                     self._emit_receipt(

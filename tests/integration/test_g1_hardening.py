@@ -494,6 +494,44 @@ def test_error_response_usage_reaches_the_journal_as_provider_actuals(
         assert data["billed_output_tokens"] == 17
 
 
+def test_rejected_request_with_reported_usage_is_still_committed(
+    tmp_path: Path,
+) -> None:
+    """A 4xx-class response is nominally non-billed, but a provider that
+    *reports usage* on it is stating what it processed; that usage must be
+    committed, never silently released (Codex R3 B4 residual)."""
+    reflecting = RecordingHttpClient(fail_status=400, fail_text="bad request")
+
+    async def post_with_usage(url: str, json: dict[str, object]) -> object:
+        return SimpleNamespace(
+            status_code=400,
+            text="bad request",
+            json=lambda: {
+                "error": "bad request",
+                "usage": {"prompt_tokens": 100_000, "completion_tokens": 17},
+            },
+        )
+
+    reflecting.post = post_with_usage  # type: ignore[method-assign]
+    anthro = RecordingAnthropicClient(
+        {"anthro-model": "proposal", "anthro-judge": DECISION_TEXT}
+    )
+    backends, scrubber = build_backends(anthro, reflecting)
+    result, run_dir = run_live(tmp_path, backends, scrubber)
+
+    assert result.status is RunStatus.FAILED
+    events = journal_events(run_dir)
+    failed = [e for e in events if e["type"] == "model.failed"]
+    assert failed, "expected a committed model.failed for the usage-bearing 400"
+    for event in failed:
+        data = event["data"]
+        assert data["usage_source"] == "provider"
+        assert data["billed_input_tokens"] == 100_000
+        assert data["billed_output_tokens"] == 17
+    committed = result.report_doc["budget"]["committed"]
+    assert committed["input_tokens"] >= 100_000
+
+
 # ---------------------------------------------------------------------------
 # External teardown (round 2) — dependency-waiting nodes close durably
 # ---------------------------------------------------------------------------

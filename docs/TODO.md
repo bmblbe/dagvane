@@ -20,8 +20,8 @@ roadmap — у [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), системні п
 | Неприйнята поверхня | Workspace Autonomous Developer небезпечний і не має product acceptance. |
 | Merge-authorized робота | Recovery 1, part A (R1-A): Security finding 001 (SEC-001), canonical filesystem identifiers і fail-closed path/worktree containment. |
 | R1-A candidate base | `7c9d982caed501605caa72e474651ba907b2bf18` |
-| Відхилені R1-A candidates | `35c6a9cafc8f255da7a1dc539e08dac13f64ebd8` — `REVISE`; `3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6` — `REVISE`. Обидва не accepted. |
-| Активна R1-A дія | Candidate `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f` має статус `VERIFY`: триває independent exact-SHA review; candidate ще не accepted. |
+| Відхилені R1-A candidates | `35c6a9cafc8f255da7a1dc539e08dac13f64ebd8`, `3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6` і `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f` — `REVISE`, не accepted. Exact-SHA review `c6fa49f` підтвердив чотири MAJOR-групи в owner-record, staging recovery, Git removal і RunState reconciliation. |
+| Активна R1-A дія | Ізольована bounded remediation поверх `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`: fixed-inode append journal, fd-bound Git removal, fail-closed preclaim recovery і manager-authoritative RunState reconciliation. Нового candidate SHA ще немає. |
 | Review-accepted held Version 1 (V1) modules | R1-B1 `11501886a5cbcc0961d1ef879a3958abdf703c6d`; R1-C0 `a5878da0e2a3d21f6076505bf5f050aea6e717f4`; R1-D0 `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`; R1-E0 `fb7331e08c1661055c4b9b784b8b2b27fa3f61d5`; R1-F0 `3df316bdfefdb8a2cbbf685b42febbd6c43d08af`; R1-G0 `f4aac9a7e654a530600b6587acf575de0b1ae068`. Це accepted лише в isolated module scope; вони не закривають R1 і не мають права інтеграції. |
 | Latest R1-G0 evidence | На `f4aac9a7e654a530600b6587acf575de0b1ae068`: focused 21 passed; full 783 passed, 1 skipped; Ruff/mypy clean; independent review 0 BLOCKER, 0 MAJOR, 0 MINOR. |
 | Latest R1-D0 evidence | На `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`: focused 153 passed; full 915 passed, 1 skipped; Ruff/mypy clean; independent review `PASS`. Статус `HELD-ACCEPTED`. |
@@ -74,7 +74,7 @@ Severity і priority — різні речі:
 
 | Lane | Поточний стан | Наступна дія | Exit evidence |
 |---|---|---|---|
-| R1-A / SEC-001 | `VERIFY` at `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`, merge-authorized, not accepted | Завершити independent exact-SHA review. | Mandatory SEC-001 regressions, full gates і independent review zero BLOCKER/MAJOR на тому самому clean candidate SHA. |
+| R1-A / SEC-001 | `REVISE` after exact-SHA review of `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`; bounded remediation active, merge-authorized, not accepted | Створити новий clean candidate SHA, пройти full gates і повторне independent exact-SHA review. | Mandatory SEC-001 regressions, full gates і independent review zero BLOCKER/MAJOR на тому самому clean candidate SHA. |
 | R1-B1 / secret-safe bounded capture | `HELD-ACCEPTED` at `11501886a5cbcc0961d1ef879a3958abdf703c6d` | Не змінювати й не інтегрувати до R1-A dependency gate. | На combined SHA повторити secret/capture contracts; isolated V1 не закриває findings сам. |
 | R1-C0 / managed-process V1 | `HELD-ACCEPTED` | Не змінювати й не інтегрувати до dependency gate. | На інтеграції повторити contract/process-tree tests на combined SHA. |
 | R1-D0 / monotonic cancellation V1 | `HELD-ACCEPTED` at `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`; independent `PASS` | Не змінювати й не інтегрувати до dependency gate. | На combined SHA повторити cancellation, monotonic request-version і quiescence contracts; isolated V1 не закриває finding сам. |
@@ -141,7 +141,7 @@ Routing/escalation (`RTE`).
 
 | ID | Severity | Lane | Required result | Стан |
 |---|---|---|---|---|
-| Security 001 (`SEC-001`) | BLOCKER | R1-A | Canonical IDs; path/worktree effects fail closed. | `VERIFY` at `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`; independent exact-SHA review active, not accepted. |
+| Security 001 (`SEC-001`) | BLOCKER | R1-A | Canonical IDs; path/worktree effects fail closed. | `REVISE` after review of `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`; remediation active, no replacement SHA yet. |
 | Security 002 (`SEC-002`) | BLOCKER | R1-B | Жодних durable raw credential bytes. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Resource 001 (`RES-001`) | MAJOR | R1-B | Bounded streaming output із чесним truncation report. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Runtime 001 (`RUN-001`) | BLOCKER | R1-C | Durable process ownership до першого child effect. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |

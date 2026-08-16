@@ -21,10 +21,10 @@ roadmap — у [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), системні п
 | Merge-authorized робота | Recovery 1, part A (R1-A): Security finding 001 (SEC-001), canonical filesystem identifiers і fail-closed path/worktree containment. |
 | R1-A candidate base | `7c9d982caed501605caa72e474651ba907b2bf18` |
 | Відхилені R1-A candidates | `35c6a9cafc8f255da7a1dc539e08dac13f64ebd8` — `REVISE`; `3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6` — `REVISE`. Обидва не accepted. |
-| Активна R1-A дія | Integrator active; accepted R1-A integration SHA ще немає. Наступний candidate має пройти mandatory regressions, full gates і незалежний review. |
-| Review-accepted held Version 1 (V1) modules | R1-B1 `11501886a5cbcc0961d1ef879a3958abdf703c6d`; R1-C0 `a5878da0e2a3d21f6076505bf5f050aea6e717f4`; R1-E0 `fb7331e08c1661055c4b9b784b8b2b27fa3f61d5`; R1-F0 `3df316bdfefdb8a2cbbf685b42febbd6c43d08af`; R1-G0 `f4aac9a7e654a530600b6587acf575de0b1ae068`. Це accepted лише в isolated module scope; вони не закривають R1 і не мають права інтеграції. |
+| Активна R1-A дія | Candidate `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f` має статус `VERIFY`: триває independent exact-SHA review; candidate ще не accepted. |
+| Review-accepted held Version 1 (V1) modules | R1-B1 `11501886a5cbcc0961d1ef879a3958abdf703c6d`; R1-C0 `a5878da0e2a3d21f6076505bf5f050aea6e717f4`; R1-D0 `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`; R1-E0 `fb7331e08c1661055c4b9b784b8b2b27fa3f61d5`; R1-F0 `3df316bdfefdb8a2cbbf685b42febbd6c43d08af`; R1-G0 `f4aac9a7e654a530600b6587acf575de0b1ae068`. Це accepted лише в isolated module scope; вони не закривають R1 і не мають права інтеграції. |
 | Latest R1-G0 evidence | На `f4aac9a7e654a530600b6587acf575de0b1ae068`: focused 21 passed; full 783 passed, 1 skipped; Ruff/mypy clean; independent review 0 BLOCKER, 0 MAJOR, 0 MINOR. |
-| Очікує re-review | R1-D0 remediation candidate `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`: `VERIFY/PARALLEL-HELD`, pending independent re-review, not accepted. Він замінює `9bb2aa90586644cb5288f0af1df6b7803fa3ce07`, що отримав `REVISE` — 1 MAJOR. |
+| Latest R1-D0 evidence | На `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`: focused 153 passed; full 915 passed, 1 skipped; Ruff/mypy clean; independent review `PASS`. Статус `HELD-ACCEPTED`. |
 | User-safe Command-Line Interface (CLI) | Тільки `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. |
 | Stop gate | До integrated R1-H жодна workspace-команда не використовується на реальному або цінному repository. |
 | Далі | Прийняти R1-A exact candidate; завершити active/verify lanes; інтегрувати лише `HELD-ACCEPTED` modules у dependency order; завершити R1-H; лише тоді починати G2. |
@@ -74,10 +74,10 @@ Severity і priority — різні речі:
 
 | Lane | Поточний стан | Наступна дія | Exit evidence |
 |---|---|---|---|
-| R1-A / SEC-001 | `ACTIVE`, merge-authorized | Integrator з'єднує canonical IDs і managed Git worktree ownership після двох `REVISE` candidates. | Новий clean integration SHA; mandatory SEC-001 regressions; full gates; independent review zero BLOCKER/MAJOR. |
+| R1-A / SEC-001 | `VERIFY` at `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`, merge-authorized, not accepted | Завершити independent exact-SHA review. | Mandatory SEC-001 regressions, full gates і independent review zero BLOCKER/MAJOR на тому самому clean candidate SHA. |
 | R1-B1 / secret-safe bounded capture | `HELD-ACCEPTED` at `11501886a5cbcc0961d1ef879a3958abdf703c6d` | Не змінювати й не інтегрувати до R1-A dependency gate. | На combined SHA повторити secret/capture contracts; isolated V1 не закриває findings сам. |
 | R1-C0 / managed-process V1 | `HELD-ACCEPTED` | Не змінювати й не інтегрувати до dependency gate. | На інтеграції повторити contract/process-tree tests на combined SHA. |
-| R1-D0 / monotonic cancellation V1 | `VERIFY/PARALLEL-HELD` at `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`, pending re-review, not accepted | Незалежно перевірити remediation phase-advance/request-version finding. | Linearizable cancellation, monotonic request version і quiescence regressions accepted. |
+| R1-D0 / monotonic cancellation V1 | `HELD-ACCEPTED` at `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`; independent `PASS` | Не змінювати й не інтегрувати до dependency gate. | На combined SHA повторити cancellation, monotonic request-version і quiescence contracts; isolated V1 не закриває finding сам. |
 | R1-E0 / exact-SHA evidence V1 | `HELD-ACCEPTED` | Тримати isolated; підготувати dependency-safe integration. | Fresh immutable evidence views; mutation invalidates evidence. |
 | R1-F0 / strict review-document V1 | `HELD-ACCEPTED` | Тримати isolated; не трактувати як повну provenance acceptance. | Strict parser/reviewer integration на combined SHA. |
 | R1-G0 / no-progress escalation V1 | `HELD-ACCEPTED` at `f4aac9a7e654a530600b6587acf575de0b1ae068`; independent `PASS`, 0 BLOCKER/MAJOR/MINOR | Не змінювати й не інтегрувати до dependency gate. | На combined SHA повторити escalation contracts; isolated V1 не закриває finding сам. |
@@ -141,12 +141,12 @@ Routing/escalation (`RTE`).
 
 | ID | Severity | Lane | Required result | Стан |
 |---|---|---|---|---|
-| Security 001 (`SEC-001`) | BLOCKER | R1-A | Canonical IDs; path/worktree effects fail closed. | `REMEDIATION` |
+| Security 001 (`SEC-001`) | BLOCKER | R1-A | Canonical IDs; path/worktree effects fail closed. | `VERIFY` at `c6fa49f6834428ec4106de1bc4ceb8816a37ae2f`; independent exact-SHA review active, not accepted. |
 | Security 002 (`SEC-002`) | BLOCKER | R1-B | Жодних durable raw credential bytes. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Resource 001 (`RES-001`) | MAJOR | R1-B | Bounded streaming output із чесним truncation report. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Runtime 001 (`RUN-001`) | BLOCKER | R1-C | Durable process ownership до першого child effect. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Runtime 002 (`RUN-002`) | MAJOR | R1-C | TERM→KILL охоплює process group; record живе до reap/quiescence. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
-| Runtime 003 (`RUN-003`) | MAJOR | R1-D | Cancellation linearizable й monotonic. | `VERIFY/PARALLEL-HELD`; remediation re-review pending. |
+| Runtime 003 (`RUN-003`) | MAJOR | R1-D | Cancellation linearizable й monotonic. | V1 `HELD-ACCEPTED` at `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`; finding не закритий до integration. |
 | Evidence 001 (`EVD-001`) | BLOCKER | R1-E | Acceptance commands не можуть author/forge candidate bytes. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Evidence 002 (`EVD-002`) | MAJOR | R1-E | Кожна evidence command бачить fresh exact-SHA view. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Review 001 (`REV-001`) | MAJOR | R1-F | Malformed/unknown review ніколи не стає PASS. | V1 `HELD-ACCEPTED`; integration pending. |

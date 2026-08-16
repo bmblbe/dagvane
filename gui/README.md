@@ -7,7 +7,8 @@ build command чи desktop binary.
 
 Dagvane GUI планується як thin client на C++20/Qt 6:
 
-- Python engine зберігає provider, workflow, tool, Git і Goal logic;
+- headless (без власного графічного вікна) Python engine зберігає provider,
+  workflow, tool, Git і Goal logic;
 - C++ client містить protocol client, view models і presentation;
 - GUI запускає engine окремим `QProcess`, а не імпортує Python code;
 - owner approvals та Git integration лишаються явними діями.
@@ -17,9 +18,31 @@ G5 має дві послідовні частини:
 1. стабільний versioned command/result IPC між процесами;
 2. Qt client поверх замороженого IPC contract.
 
+## IPC-рішення ще не прийняте
+
 Поточний Council NDJSON — stream journal events, а не GUI IPC: у ньому немає
 повного request/result, handshake, approval, backpressure й lifecycle
 contract.
+
+Transport і lifecycle IPC v1 залишаються unresolved. Спочатку окремий
+acceptance harness має перевірити crash, reconnect, cancellation, approvals,
+frame bounds і slow consumer. Потім новий owner-approved ADR (Architecture
+Decision Record — запис архітектурного рішення) має заморозити один protocol і
+явно supersede несумісні старі припущення. До цього Qt writer не обирає
+transport самостійно й GUI implementation не починається.
+
+## Запланований user journey — недоступний сьогодні
+
+1. Вибрати project і перевірити connection до engine.
+2. Почати або продовжити conversation.
+3. Переглянути Goal contract — зафіксовану мету, acceptance conditions,
+   permissions, budget і non-goals — перед approval.
+4. Явно approve або відхилити contract.
+5. Спостерігати run, cancellation, costs і errors.
+6. Переглянути artifacts, exact tested commit, diff та independent reviews.
+7. Явно прийняти або відхилити owner-controlled Git integration.
+
+Усі сім кроків — planned product journey, а не доступна сьогодні Qt feature.
 
 ## Запланована поверхня
 

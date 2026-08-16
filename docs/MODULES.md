@@ -1,8 +1,8 @@
 # Модулі Dagvane
 
 Це карта фактичного package layout: де шукати code, що він робить і яку
-зрілість має. Поточні candidate SHA та findings не дублюються тут — дивіться
-[`TODO.md`](TODO.md).
+зрілість має. Поточні candidate SHA (Git commit IDs запропонованих змін) та
+findings не дублюються тут — дивіться [`TODO.md`](TODO.md).
 
 ## Позначки зрілості
 
@@ -145,7 +145,7 @@ derived views із fsync/atomic ordering. **Accepted** для Council.
 | Модуль | Що робить | Maturity / головна межа |
 |---|---|---|
 | `application/chat.py` | Conversations, messages, prompt window, ExternalAgent call. | **candidate**; identifier, context і secret boundaries проходять recovery. |
-| `application/goals.py` | Goal contract, freeze/hash, status і serialization. | **candidate**; filesystem identity та cross-file state ще не accepted. |
+| `application/goals.py` | Goal contract (мета, acceptance conditions, limits), freeze/hash, status і serialization. | **candidate**; filesystem identity та cross-file state ще не accepted. |
 | `application/prepare.py` | Draft Goal із conversation; baseline після approval. | **candidate**; evidence isolation ще не product-accepted. |
 | `application/resources.py` | Configured resources і deterministic attempt/tier selection. | **partial candidate**; capabilities, concurrency і escalation не завершені. |
 | `application/localmodel.py` | Ollama availability probe та summarization seam. | **partial**; summarizer не підключений, application створює concrete adapter. |

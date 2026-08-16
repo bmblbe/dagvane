@@ -1,13 +1,14 @@
 # План розробки Dagvane
 
 Це одна лінійна карта до першого повного локального релізу. Тут немає дат,
-candidate SHA або test counts. Поточний status і докази живуть тільки в
-[`TODO.md`](TODO.md).
+candidate SHA (ID запропонованого Git commit) або test counts. Поточний status
+і докази живуть тільки в [`TODO.md`](TODO.md).
 
 Owner decision збережено без змін: повний Release Candidate 1 (RC1) включає
 CLI, Python engine, stable IPC і нативний C++20/Qt 6 GUI. Робота над MilHRMS
 починається лише після explicit owner acceptance повного RC1.
-Інакше кажучи, RC1 включає Qt; проміжний headless build не є повним RC1.
+Інакше кажучи, RC1 включає Qt; проміжний headless (без GUI) build не є повним
+RC1.
 
 ## Карта одним рядком
 
@@ -77,7 +78,7 @@ R1 поділений на малі перевірювані частини:
 | R1-E | Нечесні verification/baseline commands. | Fresh exact-SHA view; evidence-команди не можуть писати candidate code. |
 | R1-F | Review і contributor provenance. | Strict review documents, pinned reviewer input і durable authorship. |
 | R1-G | Повторення без прогресу. | Escalation за новим evidence або чесний terminal BLOCKED. |
-| R1-H | Усі попередні частини разом. | Один clean integration SHA, full gates і zero unresolved BLOCKER/MAJOR. |
+| R1-H | Усі попередні частини разом. | Один clean integration SHA — commit після з'єднання accepted parts; full gates і zero unresolved BLOCKER/MAJOR. |
 
 ### Вхід R1
 
@@ -137,7 +138,8 @@ Acceptance evidence — у [`TODO.md`](TODO.md).
 - Dagvane володіє canonical conversation history;
 - `fresh`, `resume` і `reconstruct` мають різні explicit contracts;
 - кожен важливий model call має `ContextSnapshot`;
-- Goal, attempts, approvals, evidence й terminal state переживають crash;
+- Goal, attempts, approvals, evidence й terminal state (фінальний стан без
+  подальших effects) переживають crash;
 - Council і Goal runtime використовують узгоджені durability semantics;
 - read-only workers мають bounded vendor-neutral routing.
 
@@ -165,7 +167,8 @@ Acceptance evidence — у [`TODO.md`](TODO.md).
 
 ### Не входить
 
-General DAG, adaptive routing і GUI.
+General DAG (directed acyclic graph — план залежностей без циклів), adaptive
+routing і GUI.
 
 ---
 

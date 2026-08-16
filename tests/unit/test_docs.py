@@ -133,11 +133,11 @@ def test_readme_describes_the_real_cli_and_python_floor() -> None:
     assert "3.11" in _read("DEVELOPMENT.md")
 
 
-def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
-    """README carries the durable stop-gate warning; volatile SHAs and finding
-    counts live only in TODO, the single canonical changing-status ledger."""
+def test_live_dashboard_structure_and_stop_gate_are_explicit() -> None:
+    """Validate stable dashboard invariants without copying volatile facts."""
     readme = _read("README.md")
     todo = _read("docs/TODO.md")
+    dashboard = todo.split("## Live dashboard", 1)[1].split("## Stop gates", 1)[0]
 
     assert "goal run" in readme
     assert "Stop gate" in readme
@@ -145,17 +145,18 @@ def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
     for unsafe_surface in ("goal prepare", "goal approve", "conversations show/use"):
         assert unsafe_surface in readme
 
-    for fact in (
-        "4 BLOCKER",
-        "7 MAJOR",
-        "b846dfd3b9027e25a37d9be055c6764a2a4ed536",
-        "7c9d982caed501605caa72e474651ba907b2bf18",
-        "35c6a9cafc8f255da7a1dc539e08dac13f64ebd8",
-        "3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6",
-        "a5878da0e2a3d21f6076505bf5f050aea6e717f4",
-        "fb7331e08c1661055c4b9b784b8b2b27fa3f61d5",
-        "3df316bdfefdb8a2cbbf685b42febbd6c43d08af",
-        "Fable remediation",
+    assert "Immutable documentation source baseline" in dashboard
+    assert "не твердження про те, куди зараз вказує `main`" in dashboard
+    assert "| Repository `main` |" not in dashboard
+    assert re.search(
+        r"\| Immutable documentation source baseline \| `[0-9a-f]{40}`;",
+        dashboard,
+    )
+    assert "не має product acceptance" in dashboard
+    assert "accepted лише в isolated module scope" in dashboard
+    assert "## Що означають statuses" in todo
+    assert "## Actionable R1 ledger" in todo
+    for lane in (
         "R1-A",
         "R1-B1",
         "R1-C0",
@@ -163,14 +164,13 @@ def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
         "R1-E0",
         "R1-F0",
         "R1-G0",
-        "HELD-ACCEPTED",
-        "PARALLEL-HELD",
-        "MilHRMS",
-        "RC1",
+        "R1-H",
     ):
-        assert fact in todo, f"TODO must carry current live fact {fact!r}"
-    assert todo.count("`REVISE`") >= 2
-    assert "не має product acceptance" in todo
+        assert lane in todo
+    assert "`PASS`" in todo
+    assert "це не acceptance" in todo
+    assert "HELD-ACCEPTED" in todo
+    assert "PARALLEL-HELD" in todo
     assert "process record" in todo.lower()
     assert "Destructive worktree API" in todo
 
@@ -222,6 +222,71 @@ def test_todo_expands_finding_prefixes_and_keeps_sec001_regressions() -> None:
         "manifest із підміненою internal identity",
     ):
         assert regression in todo
+
+
+def test_glossary_covers_reader_critical_system_and_sha_terms() -> None:
+    glossary = _read("docs/GLOSSARY.md")
+    for term in (
+        "**Headless**",
+        "**Git HEAD**",
+        "**DAG (directed acyclic graph)**",
+        "**Goal contract**",
+        "**Terminal state**",
+        "**Base SHA**",
+        "**Candidate SHA**",
+        "**Tested SHA**",
+        "**Integration SHA**",
+        "**Artifact SHA-256**",
+    ):
+        assert term in glossary, f"glossary must define {term}"
+    assert "SHA-1" in glossary
+    assert "SHA-256" in glossary
+    assert "не взаємозамінні" in glossary
+
+
+def test_readme_and_gui_separate_present_and_unavailable_user_flows() -> None:
+    readme = _read("README.md")
+    gui = _read("gui/README.md")
+    normalized_readme = re.sub(r"\s+", " ", readme)
+
+    for heading in (
+        "## Що користувач може зробити зараз",
+        "## Цільовий Workspace flow — недоступний",
+        "## Side effects за command family",
+        "## Заплановано, але таких команд ще немає",
+    ):
+        assert heading in readme
+    assert "Council не створює Git candidate" in normalized_readme
+    assert "Goal contract" in readme
+    assert "base SHA" in readme
+    assert "candidate SHA" in readme
+    assert "tested SHA" in readme
+    assert "integration SHA" in readme
+    for command_family in (
+        "`plan council`",
+        "`council --fixture`",
+        "`council --profile`",
+        "`chat`",
+        "`conversations`",
+        "`config`",
+        "`goal`",
+    ):
+        assert f"| {command_family} |" in readme
+    assert "| `runs show`, `events` |" in readme
+    for planned_noncommand in (
+        "`runs list`",
+        "daemon",
+        "REPL",
+        "DAG",
+        "`serve --stdio`",
+    ):
+        assert planned_noncommand in readme
+
+    assert "## Запланований user journey — недоступний сьогодні" in gui
+    assert "IPC-рішення ще не прийняте" in gui
+    assert "новий owner-approved ADR" in gui
+    assert "Goal contract" in gui
+    assert "owner-controlled Git integration" in gui
 
 
 STABLE_DOCS_WITHOUT_VOLATILE_SHAS = (

@@ -52,6 +52,20 @@ python -m pip install -e ".[dev]"
 Не переносіть `anthropic`, `httpx` або інший provider SDK у default
 dependencies.
 
+## Який SHA що означає
+
+Git HEAD — reference на commit, який зараз checked out. Не використовуйте
+рухому branch name як evidence. У workflow є чотири різні ролі commit ID:
+
+- **base SHA** — exact starting commit;
+- **candidate SHA** — commit із запропонованою зміною;
+- **tested SHA** — commit, на якому фактично виконані gates;
+- **integration SHA** — новий commit після з'єднання accepted parts, який
+  потребує власних gates і review.
+
+Цей repository використовує Git SHA-1 IDs. Artifact SHA-256 — content digest
+інших bytes; він не взаємозамінний із Git commit ID.
+
 ## Обов'язкові gates
 
 Перед handoff будь-якої code-зміни мають пройти:
@@ -140,8 +154,9 @@ execution після crash. Не називайте його execution resume.
 
 ### Workspace / Autonomous Developer
 
-Workspace candidate зберігає conversations, Goal contracts, run state,
-agent runs і worktrees під `.dagvane/`. Він має іншу persistence model і не
+Workspace candidate зберігає conversations, Goal contracts (зафіксовані мета,
+acceptance conditions, limits і non-goals), run state, agent runs і worktrees
+під `.dagvane/`. Він має іншу persistence model і не
 успадковує гарантії Council автоматично. Його команди залишаються за stop gate
 до завершення R1 recovery.
 
@@ -229,8 +244,8 @@ default acceptance gate без окремого рішення власника.
 ### Failure tests
 
 Для коду з effects перевіряйте crash до/після durable write, повторний
-startup, timeout, cancellation, malformed state, dirty checkout, moved HEAD,
-storage failure та повторення тієї самої помилки без нового evidence.
+startup, timeout, cancellation, malformed state, dirty checkout, moved Git
+HEAD, storage failure та повторення тієї самої помилки без нового evidence.
 
 ## Bounded versioned workflow
 

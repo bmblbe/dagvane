@@ -1,12 +1,18 @@
 # Dagvane
 
-Dagvane — локальний Python-рушій для інженерних задач, у яких кілька
-AI-моделей пропонують рішення, перевіряють одна одну й залишають відтворювані
-докази. Рушій зберігає події та артефакти, контролює бюджет і передає людині
-точний Git-коміт для рішення. Він не робить push або merge самостійно.
+Dagvane сьогодні — локальний Python CLI-рушій для Council: кілька AI-моделей
+пропонують рішення, перевіряють одна одну, а judge формує результат. Ця
+прийнята частина зберігає події й артефакти, контролює budget і дає людині
+відтворюваний decision. Вона не редагує project code й не створює Git
+candidate.
 
-Проєкт ще розробляється. Поточний статус, активні дефекти й точні Git SHA
-ведуться тільки в [`docs/TODO.md`](docs/TODO.md).
+У repository також є експериментальний Workspace Autonomous Developer. Його
+майбутня мета — підготувати перевірений Git candidate для owner decision, але
+цей end-to-end flow ще небезпечний і не прийнятий. Проєкт не робить push або
+merge самостійно.
+
+Поточний status, active defects і exact commit IDs ведуться тільки в
+[`docs/TODO.md`](docs/TODO.md).
 
 ## Що готове, а що ні
 
@@ -17,6 +23,20 @@ AI-моделей пропонують рішення, перевіряють о
 | Перегляд збережених Council runs та events | Прийнято. |
 | Workspace chat, conversations, config і Goal runner | Є в коді, але не прийнято: триває security/durability recovery. |
 | Desktop GUI на C++20/Qt 6 | Заплановано; Qt-коду ще немає. |
+
+## Що користувач може зробити зараз
+
+```text
+Task JSON
+  → перевірити й надрукувати fixed Council plan
+  → виконати Council через offline fixture або explicit live profile
+  → отримати durable journal та content-addressed artifacts
+  → отримати valid decision/report або чесний failed run
+  → переглянути збережений run і canonical events
+```
+
+Це дає перевірюваний multi-model decision без зміни source checkout. Council
+не створює Git candidate й не запускає зовнішній coding agent.
 
 > **Stop gate.** До інтегрованого прийняття R1-H **жодна workspace-команда**
 > не дозволена на реальному або цінному репозиторії. Це стосується `chat`,
@@ -147,6 +167,59 @@ dagvane goal prepare|show|approve|run|resume|cancel|list
 
 Не передавайте цим командам secrets або production data. `.dagvane/`
 ігнорується Git, але не є secret store чи security boundary.
+
+## Цільовий Workspace flow — недоступний
+
+Після R1/G2/G3 очікується такий user flow:
+
+```text
+chat
+  → Goal contract (мета, acceptance conditions, limits)
+  → owner review та approve
+  → bounded run у managed worktree
+  → candidate commit
+  → tests та independent review
+  → owner-controlled integration
+```
+
+`Goal contract` — зафіксована мета, acceptance conditions, allowed effects,
+budget і non-goals. Git identities у цьому flow мають різні ролі:
+
+- **base SHA** — commit, від якого починається зміна;
+- **candidate SHA** — commit із запропонованою зміною;
+- **tested SHA** — commit, на якому фактично пройшли gates; Git HEAD
+  (посилання на currently checked-out commit) має йому відповідати;
+- **integration SHA** — окремий commit після з'єднання accepted parts, який
+  знову потребує tests і review.
+
+У цьому repository ці Git commit IDs використовують SHA-1. Artifact SHA-256
+під `.dagvane/runs/` — digest content bytes, а не Git commit ID; ці два типи
+не взаємозамінні.
+
+Run може завершитися лише після terminal state — кінцевого стану, після якого
+нові effects заборонені. Ці гарантії ще не прийняті end-to-end, тому схема
+вище описує target, а не доступний safe workflow.
+
+## Side effects за command family
+
+| Command family | Фактичні effects сьогодні |
+|---|---|
+| `plan council` | Читає task і пише JSON у stdout; не створює state, не викликає network/model і не змінює Git. |
+| `council --fixture` | Читає task/fixture та пише новий immutable run під `.dagvane/runs/`; без network, coding agent або Git mutation. |
+| `council --profile` | Читає task/profile і credential environment variables, викликає налаштовані provider APIs та пише `.dagvane/runs/`; не редагує Git checkout. |
+| `runs show`, `events` | Читають наявний Council run і пишуть result у stdout; не змінюють state або Git. |
+| `chat` | Може створити Workspace state, записати conversation/agent-run artifacts і запустити configured external agent process, включно з network-capable runtime. |
+| `conversations` | Може ініціалізувати Workspace directories; `list/show/current` читають conversation state, `use` змінює current pointer. |
+| `config` | Кожен виклик ініціалізує Workspace directories і `.dagvane/.gitignore`; `list/get` читають, `set/edit` змінюють `.dagvane/config.toml`, а `edit` замінює process на external editor. |
+| `goal` | Залежно від subcommand пише Goal/run state, створює Git worktrees, запускає shell/coding agents, signals processes і створює candidate commits. Automatic push/merge відсутній. |
+
+## Заплановано, але таких команд ще немає
+
+Не покладайтеся на синтаксис для `runs list`, daemon або REPL, generic DAG
+(directed acyclic graph — план залежностей без циклів), `serve --stdio`,
+context/memory inspection, ToolBroker approvals чи GUI control. Це planned
+capabilities, а не приховані commands. Їхні names і wire contracts мають бути
+прийняті окремо.
 
 ## Worktree не є sandbox
 

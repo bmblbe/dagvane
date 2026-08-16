@@ -10,6 +10,8 @@ Python types, наприклад `ChatBackend`, не перекладаютьс�
   `dagvane ...`. Сьогодні це єдиний реалізований user interface.
 - **GUI (graphical user interface)** — графічний desktop client. У Dagvane
   це запланований C++20/Qt 6 thin client; Qt implementation ще немає.
+- **Headless** — engine працює без власного графічного вікна. Ним керують
+  через CLI або майбутній IPC; це не означає відсутність user interface.
 - **IPC (inter-process communication)** — versioned messages між окремими
   процесами Python engine і майбутнього GUI. Поточний Council event stream не
   є таким command/result protocol.
@@ -29,14 +31,30 @@ Python types, наприклад `ChatBackend`, не перекладаютьс�
   boundary. Invalid document відхиляється до effect.
 - **SDK (software development kit)** — бібліотека vendor. Provider SDK у
   Dagvane є optional і імпортується тільки всередині adapter.
+- **DAG (directed acyclic graph)** — план як граф залежностей без циклів:
+  крок може чекати інші кроки, але залежності не можуть повернутися до себе.
 
 ## Git, evidence і acceptance
 
-- **SHA / exact SHA** — Git commit identifier. Branch name може рухатися, а
-  exact SHA називає один конкретний immutable commit. Tests, review і
-  acceptance мають посилатися саме на exact SHA.
-- **Candidate** — commit, який підготовлено для перевірки, але ще не прийнято.
-  Passing tests самі по собі не роблять його accepted.
+- **Git SHA / exact SHA** — object ID Git commit. Цей repository використовує
+  SHA-1, тому повний commit ID має 40 hexadecimal characters. Branch name може
+  рухатися, а exact SHA називає один конкретний commit. Це identity, а не
+  окремий доказ безпеки чи acceptance.
+- **Artifact SHA-256** — 64-символьний digest вмісту артефакту. Він перевіряє
+  інший об'єкт та використовує інший hash algorithm, ніж Git SHA-1; ці
+  identifiers не взаємозамінні.
+- **Git HEAD** — Git reference на commit, який зараз checked out. HEAD або
+  branch може змінитися, тому evidence фіксує exact commit ID окремо.
+- **Base SHA** — exact commit, від якого writer починає bounded change.
+- **Candidate SHA** — exact commit із запропонованою зміною. Candidate ще не
+  accepted; remediation завжди створює новий candidate SHA.
+- **Tested SHA** — exact commit, на якому фактично виконали названі gates.
+  Якщо HEAD або tracked bytes змінилися, старий test report не доводить новий
+  state.
+- **Integration SHA** — новий exact commit після з'єднання accepted parts.
+  Він відрізняється від module candidate і потребує власних gates та review.
+- **Candidate** — code або candidate SHA, підготовлений для перевірки, але ще
+  не прийнятий. Passing tests самі по собі не роблять його accepted.
 - **Accepted SHA** — exact commit, для якого required gates, independent
   review і потрібна owner disposition завершені у визначеному scope.
 - **Worktree** — окремий checkout одного Git repository зі своїми working
@@ -90,6 +108,12 @@ Python types, наприклад `ChatBackend`, не перекладаютьс�
 
 ## State і recovery
 
+- **Goal contract** — зафіксований опис мети: objective, acceptance
+  conditions, allowed commands/effects, budget, limits і non-goals. Owner
+  review/approval не можна підміняти model-generated draft.
+- **Terminal state** — фінальний стан run, після якого нові робочі effects і
+  state transitions заборонені. `completed`, `failed` або `cancelled` можуть
+  бути різними terminal outcomes; `blocked` не обов'язково terminal.
 - **Durable state** — state, записаний так, щоб пережити process restart або
   crash.
 - **Journal** — append-only послідовність events. Для Council це canonical

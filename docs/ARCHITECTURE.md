@@ -1,7 +1,8 @@
 # Архітектура Dagvane
 
-Dagvane — headless Python engine, який планує multi-model workflows, зберігає
-їхній стан, контролює effects і готує Git candidate для рішення власника.
+Dagvane — headless (працює без власного графічного вікна) Python engine, який
+планує multi-model workflows, зберігає їхній стан, контролює effects і готує
+Git candidate для рішення власника.
 Сьогодні інтерфейсом є CLI. Майбутній C++20/Qt 6 GUI буде тонким клієнтом того
 самого engine.
 
@@ -42,8 +43,8 @@ owner
 ```
 
 Власник залишається integration authority. Навіть успішний run може лише
-підготувати reviewed candidate SHA; automatic push або final merge не є
-частиною engine contract.
+підготувати reviewed candidate SHA — Git commit ID запропонованої зміни;
+automatic push або final merge не є частиною engine contract.
 
 ## Реальність сьогодні: два runtime
 
@@ -81,7 +82,7 @@ execution після process crash.
 ```text
 workspace CLI
   → conversation
-  → Goal draft and owner approval
+  → Goal contract draft (мета, acceptance conditions, limits) and owner approval
   → external coding agent
   → Git worktree
   → checks, review and remediation
@@ -197,7 +198,8 @@ Continuity policies також різні:
 ```
 
 Journal і artifacts — canonical. `decision.json` та `report.json` можна
-відбудувати з них. Storage failure не вигадує terminal success.
+відбудувати з них. Storage failure не вигадує terminal state — фінальний стан,
+після якого нові effects заборонені.
 
 ### Workspace candidate
 
@@ -249,6 +251,17 @@ fail-closed. Це target, а не чинний обхід R1 stop gate.
 Known credential values мають проходити shared scrubber до truncation,
 persistence, logs, artifacts або transfer іншій model.
 
+## Чотири Git SHA у candidate lifecycle
+
+- **Base SHA** — exact starting commit writer.
+- **Candidate SHA** — commit із запропонованою зміною.
+- **Tested SHA** — commit, на якому фактично виконані gates.
+- **Integration SHA** — commit після з'єднання accepted parts; він окремо
+  проходить gates і review.
+
+Це ролі Git commit IDs. Вони не є artifact SHA-256 digests; відмінність
+пояснена в [`GLOSSARY.md`](GLOSSARY.md).
+
 ## Exact-SHA candidate contract
 
 Branch name може рухатися; exact SHA називає один immutable commit. Тому
@@ -259,7 +272,8 @@ Branch name може рухатися; exact SHA називає один immutab
 3. durable identity записується до external effect;
 4. усі intended bytes commit-яться;
 5. tests працюють у fresh checkout exact candidate SHA;
-6. tracked mutation або moved HEAD робить evidence invalid;
+6. tracked mutation або moved Git HEAD (reference на currently checked-out
+   commit) робить evidence invalid;
 7. independent reviewer бачить той самий exact SHA;
 8. finding зберігається разом із disposition;
 9. remediation створює новий SHA;
@@ -270,9 +284,9 @@ Untracked cache не є deliverable й не доводить властивос�
 
 ## Workflow strategy
 
-Спочатку будуються fixed typed workflows. General DAG допускається лише після
-стабільних primitives: validator має відхилити invalid dependency, permission
-або budget до effect.
+Спочатку будуються fixed typed workflows. General DAG (directed acyclic graph
+— план залежностей без циклів) допускається лише після стабільних primitives:
+validator має відхилити invalid dependency, permission або budget до effect.
 
 Паралельні readers можуть дивитися один repository. Паралельні writers мають
 окремі worktrees, frozen versioned interfaces й окремі candidate SHAs.

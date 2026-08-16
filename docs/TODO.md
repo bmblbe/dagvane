@@ -1,33 +1,39 @@
 # Поточний стан і TODO
 
 Це єдиний live dashboard Dagvane. Тут зберігаються поточні statuses, test
-evidence і точні Git SHA (Secure Hash Algorithm identifiers — ідентифікатори
-конкретних commits). Стабільна roadmap — у
-[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), системні правила — у
-[`ARCHITECTURE.md`](ARCHITECTURE.md), терміни — у
-[`GLOSSARY.md`](GLOSSARY.md).
+evidence і точні Git commit IDs. У цьому repository Git SHA означає
+40-символьний SHA-1 object ID commit; SHA-256 artifact digest — інший тип
+ідентифікатора. Повні визначення — у [`GLOSSARY.md`](GLOSSARY.md). Стабільна
+roadmap — у [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), системні правила —
+у [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+У ledger **base SHA** — starting commit, **candidate SHA** — proposed change,
+**tested SHA** — commit фактичного gate, а **integration SHA** — commit після
+з'єднання accepted parts. Ці ролі не можна підміняти одна одною.
 
 ## Live dashboard
 
 | Поле | Поточний факт |
 |---|---|
-| Repository `main` | `b846dfd3b9027e25a37d9be055c6764a2a4ed536` |
+| Immutable documentation source baseline | `b846dfd3b9027e25a37d9be055c6764a2a4ed536`; це source commit цього docs rewrite, не твердження про те, куди зараз вказує `main`. |
 | Прийнятий фундамент | G0 (deterministic Council) і G1 (live multi-provider Council) прийняті у своєму scope. |
 | Неприйнята поверхня | Workspace Autonomous Developer небезпечний і не має product acceptance. |
 | Merge-authorized робота | Recovery 1, part A (R1-A): Security finding 001 (SEC-001), canonical filesystem identifiers і fail-closed path/worktree containment. |
 | R1-A candidate base | `7c9d982caed501605caa72e474651ba907b2bf18` |
 | Відхилені R1-A candidates | `35c6a9cafc8f255da7a1dc539e08dac13f64ebd8` — `REVISE`; `3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6` — `REVISE`. Обидва не accepted. |
-| Активна R1-A дія | Bounded Fable remediation; потім новий exact-SHA gate і незалежний review. |
-| Review-accepted held Version 1 (V1) modules | R1-C0 `a5878da0e2a3d21f6076505bf5f050aea6e717f4`; R1-E0 `fb7331e08c1661055c4b9b784b8b2b27fa3f61d5`; R1-F0 `3df316bdfefdb8a2cbbf685b42febbd6c43d08af`. Це accepted лише в isolated module scope; вони не закривають R1 і не мають права інтеграції. |
-| Інші active remediations | R1-B1, R1-D0 і R1-G0: remediation active, not accepted. |
+| Активна R1-A дія | Integrator active; accepted R1-A integration SHA ще немає. Наступний candidate має пройти mandatory regressions, full gates і незалежний review. |
+| Review-accepted held Version 1 (V1) modules | R1-B1 `11501886a5cbcc0961d1ef879a3958abdf703c6d`; R1-C0 `a5878da0e2a3d21f6076505bf5f050aea6e717f4`; R1-E0 `fb7331e08c1661055c4b9b784b8b2b27fa3f61d5`; R1-F0 `3df316bdfefdb8a2cbbf685b42febbd6c43d08af`; R1-G0 `f4aac9a7e654a530600b6587acf575de0b1ae068`. Це accepted лише в isolated module scope; вони не закривають R1 і не мають права інтеграції. |
+| Latest R1-G0 evidence | На `f4aac9a7e654a530600b6587acf575de0b1ae068`: focused 21 passed; full 783 passed, 1 skipped; Ruff/mypy clean; independent review 0 BLOCKER, 0 MAJOR, 0 MINOR. |
+| Очікує re-review | R1-D0 remediation candidate `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`: `VERIFY/PARALLEL-HELD`, pending independent re-review, not accepted. Він замінює `9bb2aa90586644cb5288f0af1df6b7803fa3ce07`, що отримав `REVISE` — 1 MAJOR. |
 | User-safe Command-Line Interface (CLI) | Тільки `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. |
 | Stop gate | До integrated R1-H жодна workspace-команда не використовується на реальному або цінному repository. |
-| Далі | Прийняти R1-A exact candidate; потім інтегрувати dependency-safe held modules по черзі; завершити R1-H; лише тоді починати G2. |
+| Далі | Прийняти R1-A exact candidate; завершити active/verify lanes; інтегрувати лише `HELD-ACCEPTED` modules у dependency order; завершити R1-H; лише тоді починати G2. |
 | Після продукту | Release Candidate 1 (RC1) включає Qt GUI; MilHRMS починається тільки після explicit owner acceptance RC1. |
 
 `R1-Xn` означає bounded lane усередині recovery R1: літера задає outcome,
-цифра — окремий module slice або iteration. Exact SHA held module не є SHA
-`main`: він стає product base лише після dependency gate та owner integration.
+цифра — окремий module slice або iteration. Exact SHA held module не є
+integration SHA: він стає частиною product line лише після dependency gate,
+повторної перевірки combined commit і owner integration.
 
 ## Stop gates
 
@@ -50,6 +56,7 @@ evidence і точні Git SHA (Secure Hash Algorithm identifiers — ідент
 | `REMEDIATION` | Candidate отримав finding; writer готує новий SHA. |
 | `VERIFY` | Candidate committed; потрібні gates та/або independent review. |
 | `REVISE` | Review verdict: candidate не прийнятий і потребує remediation. |
+| `PASS` | Один review не знайшов BLOCKER/MAJOR у своєму scope; це не acceptance без решти required verdicts, disposition і dependency gate. |
 | `PARALLEL-HELD` | Незалежну lane можна розробляти, але не інтегрувати. |
 | `HELD-ACCEPTED` | Isolated V1 пройшов свій review, але dependency/product gate ще не пройдено. |
 | `DONE` | Required evidence, accepted exact SHA і owner disposition зафіксовані. |
@@ -67,14 +74,14 @@ Severity і priority — різні речі:
 
 | Lane | Поточний стан | Наступна дія | Exit evidence |
 |---|---|---|---|
-| R1-A / SEC-001 | `REMEDIATION`, merge-authorized | Fable виправляє canonical IDs і managed Git worktree ownership після двох `REVISE` verdicts. | Новий clean SHA; mandatory SEC-001 regressions; full gates; independent review zero BLOCKER/MAJOR. |
-| R1-B1 / secret-safe bounded capture | `REMEDIATION/PARALLEL-HELD`, not accepted | Завершити remediation; повторити isolated review. | Scrub-before-persist, honest bounds і crash probes accepted; чекати R1-A dependency. |
+| R1-A / SEC-001 | `ACTIVE`, merge-authorized | Integrator з'єднує canonical IDs і managed Git worktree ownership після двох `REVISE` candidates. | Новий clean integration SHA; mandatory SEC-001 regressions; full gates; independent review zero BLOCKER/MAJOR. |
+| R1-B1 / secret-safe bounded capture | `HELD-ACCEPTED` at `11501886a5cbcc0961d1ef879a3958abdf703c6d` | Не змінювати й не інтегрувати до R1-A dependency gate. | На combined SHA повторити secret/capture contracts; isolated V1 не закриває findings сам. |
 | R1-C0 / managed-process V1 | `HELD-ACCEPTED` | Не змінювати й не інтегрувати до dependency gate. | На інтеграції повторити contract/process-tree tests на combined SHA. |
-| R1-D0 / monotonic cancellation V1 | `REMEDIATION/PARALLEL-HELD`, not accepted | Закрити review findings; новий SHA та re-review. | Linearizable cancellation і quiescence regressions accepted. |
+| R1-D0 / monotonic cancellation V1 | `VERIFY/PARALLEL-HELD` at `b2e0ff963b8a14e0ebdf688dd9f552099a13af6b`, pending re-review, not accepted | Незалежно перевірити remediation phase-advance/request-version finding. | Linearizable cancellation, monotonic request version і quiescence regressions accepted. |
 | R1-E0 / exact-SHA evidence V1 | `HELD-ACCEPTED` | Тримати isolated; підготувати dependency-safe integration. | Fresh immutable evidence views; mutation invalidates evidence. |
 | R1-F0 / strict review-document V1 | `HELD-ACCEPTED` | Тримати isolated; не трактувати як повну provenance acceptance. | Strict parser/reviewer integration на combined SHA. |
-| R1-G0 / no-progress escalation V1 | `REMEDIATION/PARALLEL-HELD`, not accepted | Закрити findings; новий SHA та re-review. | Repeated same evidence escalates або завершується чесним `BLOCKED`. |
-| R1-H / integrated recovery | `OPEN` | Почати лише після dependency-ordered acceptance R1-A…R1-G. | Один clean integration SHA, consolidated adversarial suite, full gates, independent review zero BLOCKER/MAJOR. |
+| R1-G0 / no-progress escalation V1 | `HELD-ACCEPTED` at `f4aac9a7e654a530600b6587acf575de0b1ae068`; independent `PASS`, 0 BLOCKER/MAJOR/MINOR | Не змінювати й не інтегрувати до dependency gate. | На combined SHA повторити escalation contracts; isolated V1 не закриває finding сам. |
+| R1-H / integrated recovery | `OPEN` | Почати лише після dependency-ordered acceptance R1-A…R1-G. | Один clean integration SHA (commit після з'єднання accepted parts), consolidated adversarial suite, full gates, independent review zero BLOCKER/MAJOR. |
 
 ## R1-A / SEC-001 acceptance contract
 
@@ -135,16 +142,16 @@ Routing/escalation (`RTE`).
 | ID | Severity | Lane | Required result | Стан |
 |---|---|---|---|---|
 | Security 001 (`SEC-001`) | BLOCKER | R1-A | Canonical IDs; path/worktree effects fail closed. | `REMEDIATION` |
-| Security 002 (`SEC-002`) | BLOCKER | R1-B | Жодних durable raw credential bytes. | `REMEDIATION/PARALLEL-HELD` |
-| Resource 001 (`RES-001`) | MAJOR | R1-B | Bounded streaming output із чесним truncation report. | `REMEDIATION/PARALLEL-HELD` |
+| Security 002 (`SEC-002`) | BLOCKER | R1-B | Жодних durable raw credential bytes. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
+| Resource 001 (`RES-001`) | MAJOR | R1-B | Bounded streaming output із чесним truncation report. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Runtime 001 (`RUN-001`) | BLOCKER | R1-C | Durable process ownership до першого child effect. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Runtime 002 (`RUN-002`) | MAJOR | R1-C | TERM→KILL охоплює process group; record живе до reap/quiescence. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
-| Runtime 003 (`RUN-003`) | MAJOR | R1-D | Cancellation linearizable й monotonic. | `REMEDIATION/PARALLEL-HELD` |
+| Runtime 003 (`RUN-003`) | MAJOR | R1-D | Cancellation linearizable й monotonic. | `VERIFY/PARALLEL-HELD`; remediation re-review pending. |
 | Evidence 001 (`EVD-001`) | BLOCKER | R1-E | Acceptance commands не можуть author/forge candidate bytes. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Evidence 002 (`EVD-002`) | MAJOR | R1-E | Кожна evidence command бачить fresh exact-SHA view. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 | Review 001 (`REV-001`) | MAJOR | R1-F | Malformed/unknown review ніколи не стає PASS. | V1 `HELD-ACCEPTED`; integration pending. |
 | Provenance 001 (`PROV-001`) | MAJOR | R1-F | Contributor identity durable до effect і bound до commits. | `OPEN`; R1-F0 сам не закриває outcome. |
-| Routing 001 (`RTE-001`) | MAJOR | R1-G | Progress визначається новим evidence, не лише новим SHA. | `REMEDIATION/PARALLEL-HELD` |
+| Routing 001 (`RTE-001`) | MAJOR | R1-G | Progress визначається новим evidence, не лише новим SHA. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
 
 ## Documentation і owner decisions
 

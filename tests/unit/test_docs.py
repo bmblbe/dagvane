@@ -19,6 +19,7 @@ CANONICAL_DOCS = (
     Path("docs/MODULES.md"),
     Path("docs/DEVELOPMENT_PLAN.md"),
     Path("docs/TODO.md"),
+    Path("docs/GLOSSARY.md"),
 )
 
 ACTIVE_MARKDOWN = CANONICAL_DOCS + (
@@ -132,19 +133,49 @@ def test_readme_describes_the_real_cli_and_python_floor() -> None:
     assert "3.11" in _read("DEVELOPMENT.md")
 
 
-def test_current_rejected_status_and_stop_gate_are_explicit() -> None:
+def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
+    """README carries the durable stop-gate warning; volatile SHAs and finding
+    counts live only in TODO, the single canonical changing-status ledger."""
     readme = _read("README.md")
     todo = _read("docs/TODO.md")
-    for text in (readme, todo):
-        assert "324f6c51cf7a68a8a8ad61529147873deef5a3d2" in text
-        assert "4 BLOCKER + 7 MAJOR" in text
+
     assert "goal run" in readme
     assert "Stop gate" in readme
     assert "жодна workspace-команда" in readme
     for unsafe_surface in ("goal prepare", "goal approve", "conversations show/use"):
         assert unsafe_surface in readme
+
+    assert "4 BLOCKER" in todo
+    assert "7 MAJOR" in todo
+    assert "7c9d982caed501605caa72e474651ba907b2bf18" in todo
+    assert "495b5f1b551642ce3f5bdcbe2853775d00a3fc1d" in todo
+    assert "R1-A" in todo
+    assert "process-record authority" in todo.lower()
+    assert "managed Git worktree ownership" in todo
     assert "MilHRMS" in todo
     assert "RC1" in todo
+
+
+STABLE_DOCS_WITHOUT_VOLATILE_SHAS = (
+    Path("README.md"),
+    Path("DEVELOPMENT.md"),
+    Path("docs/ARCHITECTURE.md"),
+    Path("docs/MODULES.md"),
+    Path("docs/DEVELOPMENT_PLAN.md"),
+    Path("docs/GLOSSARY.md"),
+    Path("gui/README.md"),
+)
+
+HEX_SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
+
+
+def test_only_todo_carries_volatile_git_shas() -> None:
+    """docs/TODO.md is the single canonical changing-status ledger; every
+    other active doc links to it instead of repeating an exact Git SHA."""
+    for relative in STABLE_DOCS_WITHOUT_VOLATILE_SHAS:
+        text = _read(relative)
+        matches = [m.group(0) for m in HEX_SHA.finditer(text)]
+        assert not matches, f"{relative} must not repeat a volatile SHA: {matches}"
 
 
 def test_active_docs_carry_no_retired_paths_or_legacy_claims() -> None:

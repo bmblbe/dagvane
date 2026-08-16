@@ -6,7 +6,8 @@
 
 Поточний milestone і bugs не дублюються тут. Перед початком роботи прочитайте
 [`docs/TODO.md`](docs/TODO.md), потім
-[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md).
+[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md). Незнайомі терміни —
+у [`docs/GLOSSARY.md`](docs/GLOSSARY.md).
 
 ## Development baseline
 
@@ -129,9 +130,10 @@ milestone.
 - один mutable worktree має рівно одного writer;
 - exact candidate SHA перевіряється незалежно;
 - worktree забезпечує checkout isolation, але не host containment;
-- model-modified code має `sandbox=required`; без mechanism verification
-  fail-closed, єдиний bypass — durable per-run pre-execution owner grant
-  `trusted-project` із чесним host-execution marker та збереженими limits;
+- у майбутній G3 policy model-modified code має `sandbox=required`; без
+  mechanism verification fail-closed, а майбутній виняток `trusted-project`
+  потребує durable per-run pre-execution owner grant, чесного host-execution
+  marker та збережених limits. До R1-H такого bypass немає;
 - C++/Qt містить тільки client/protocol/view-model logic.
 
 Нормативна деталізація: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) і
@@ -401,7 +403,21 @@ agy models
 - `docs/architecture/history/**` не редагується.
 - Прийняті ADR не переписуються; нова архітектурна зміна отримує новий ADR.
 
-## Documentation authority
+## Troubleshooting
+
+| Симптом | Ймовірна причина | Що робити |
+|---|---|---|
+| `uv sync` не бачить Python 3.11 | Немає інтерпретатора цієї версії в системі | Встановіть Python 3.11+ окремо; `uv` не збирає його сам. |
+| Live adapter падає з `ImportError` | Забули `--extra live` | `uv sync --python 3.11 --extra dev --extra live --locked`. |
+| Live test намагається піти в мережу без opt-in | `DAGVANE_LIVE_TESTS`/`DAGVANE_LIVE_PROFILE` не виставлені | Явно експортуйте обидві змінні або запускайте лише offline `uv run pytest`. |
+| `dagvane council` каже про конфлікт `run_id` | Той самий pinned fixture вже виконувався в цьому state root | Використайте чистий checkout або видаліть лише вами створений `.dagvane/runs/<run-id>`. |
+| Goal/workspace команда падає на `flock` | Платформа не POSIX або filesystem — NFS | Це очікувана відмова; Goal lease вимагає POSIX-локальний filesystem. |
+| Review/gate command бачить "брудний" checkout | Незакомічені або untracked зміни залишились із попереднього прогону | `git status`, приберіть/закомітьте зміни перед evidence-командою — вона має бачити чистий exact SHA. |
+
+Якщо симптом не в таблиці — почніть з `git status`, `git log -1` і
+відтворення на чистому checkout exact SHA, перш ніж підозрювати код.
+
+## Documentation authority і контракт оновлення
 
 Використовуйте три окремі джерела авторитету:
 
@@ -411,6 +427,18 @@ agy models
 3. **Порядок роботи:** `docs/DEVELOPMENT_PLAN.md`; активні defects і поточний
    stage — тільки `docs/TODO.md`.
 
-README не повинен повторювати весь TODO, а architecture не повинна називати
-гарантію candidate прийнятою. Коли статус змінюється, оновіть TODO і лише ті
-summary labels, які справді стали неправильними.
+Контракт оновлення документації, обов'язковий для кожної зміни:
+
+- volatile дані (exact SHA, test counts, статус findings, поточна підзадача)
+  редагуються **тільки** в `docs/TODO.md`;
+- README, `DEVELOPMENT_PLAN.md`, `ARCHITECTURE.md`, `MODULES.md` і
+  `gui/README.md` посилаються на TODO, а не копіюють його зміст; вони
+  редагуються лише коли змінюється щось стабільне (нова прийнята команда,
+  новий шар, нова стадія плану);
+- коли статус змінюється, оновлюється TODO і лише ті summary label в інших
+  docs, які справді стали неправильними — не переписуйте весь документ
+  заради однієї цифри;
+- нова абревіатура чи термін у будь-якому active doc отримує запис у
+  `docs/GLOSSARY.md` того самого коміту;
+- `docs/architecture/history/**` і прийняті ADR не редагуються заднім числом;
+  нове рішення отримує новий ADR.

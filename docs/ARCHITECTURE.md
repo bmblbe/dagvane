@@ -2,10 +2,9 @@
 
 Цей документ описує фактичну архітектуру поточного коду та цільові межі
 першого повного local release. Він не перетворює неприйнятий candidate на
-готову систему: maturity кожної частини позначена явно.
-
-Baseline документа: `main` на
-`324f6c51cf7a68a8a8ad61529147873deef5a3d2`.
+готову систему: maturity кожної частини позначена явно, а конкретний exact
+SHA і статус кожного findings — тільки в [`TODO.md`](TODO.md), не тут.
+Терміни — у [`GLOSSARY.md`](GLOSSARY.md).
 
 ## Авторитет і порядок вирішення суперечностей
 
@@ -111,13 +110,16 @@ workspace CLI
   → goal.json + run-state.json + log.jsonl
 ```
 
-Цей зріз існує в коді, але exact-SHA review `324f6c5…` має verdict
-**REVISE: 4 BLOCKER + 7 MAJOR**. Він не використовує Council `Run`,
+Цей зріз існує в коді, але independent exact-SHA review виявив у ньому
+серйозні defects: path escape, durable credential leakage, неповний process
+cleanup та інші. Актуальний перелік і статус кожного finding веде
+[`TODO.md`](TODO.md), не цей документ. Слайс не використовує Council `Run`,
 `EventEnvelope`, `FilesystemRunStore` або replay validator. Його state machine
 fixed, а не generic validated DAG.
 
-До recovery acceptance заборонено називати цей runtime crash-safe,
-secret-safe, exact-SHA-safe або придатним для unattended development.
+До recovery acceptance (дивись `TODO.md`) заборонено називати цей runtime
+crash-safe, secret-safe, exact-SHA-safe або придатним для unattended
+development.
 
 ## Layer boundaries
 
@@ -281,7 +283,7 @@ Workspace helpers використовують atomic replace та JSONL append,
 
 Повний release потребує:
 
-- monotonic state transitions або explicit CAS/version;
+- monotonic state transitions або explicit compare-and-swap/version;
 - attempt identity до першого external effect;
 - durable ownership/fencing;
 - restart/reconstruct усіх non-terminal workflows;
@@ -336,14 +338,16 @@ generated code без окремих механізмів для:
 - durable `DENY`, `ASK`, `ALLOW` approvals;
 - crash-safe effect/idempotency state.
 
-Binding execution policy: model-modified code має `sandbox=required` за
-default. Якщо approved mechanism недоступний, verification повертає
+Binding **майбутня G3 execution policy**: model-modified code має
+`sandbox=required` за default. Якщо approved mechanism недоступний,
+verification повертає
 `verify.refused{reason:no_sandbox}`, а run лишається recoverable `BLOCKED`.
-Єдиний bypass — explicit per-run pre-execution owner grant `trusted-project`
+Єдиний майбутній G3 bypass — explicit per-run pre-execution owner grant `trusted-project`
 із durable чесним marker «generated code executes on host without isolation».
 Навіть тоді обов'язкові frozen argv, scrubbed allowlist environment без
 secrets, synthetic HOME/XDG, managed process group, resource/output limits та
-offline/provisioned dependencies.
+offline/provisioned dependencies. До R1-H цей виняток не реалізований і не
+скасовує чинний stop gate для valuable repositories.
 
 Поточний exact-SHA review підтвердив path traversal, raw secret persistence,
 effectful evidence commands, orphan writer, incomplete group termination і
@@ -408,27 +412,12 @@ client, local view models, presentation і desktop integration. Provider,
 prompt, routing, orchestration, tools, Git та Goal evaluation залишаються у
 headless engine.
 
-## Maturity matrix
+## Де дивитись поточну зрілість
 
-| Capability | Maturity |
-|---|---|
-| Deterministic `council-v1` | Accepted G0 |
-| Durable Council journal/artifacts/replay | Accepted G0 |
-| Anthropic + generic OpenAI-compatible live council | Accepted G1 |
-| Live usage/budget/error accounting | Accepted G1 |
-| Workspace config/chat/conversations | Implemented candidate, rejected boundary |
-| Goal prepare/show/approve/run/resume/cancel | Implemented candidate, rejected boundary |
-| ExternalAgent subprocess and tier router | Implemented candidate, rejected boundary |
-| Ollama capability probe | Partial; summarizer/routing integration incomplete |
-| Full ContextSnapshot/session reconstruct | Planned G2 |
-| Unified durable Goal/workflow semantics | Planned G2 |
-| Secure ToolBroker/sandbox/approvals | Planned G3 |
-| Production ExternalAgent admission | Planned G3 after native worker/E-AGENT |
-| Validated general orchestration/adaptive router | Planned G4 |
-| Full six-phase council | Planned G4; `council-v1` remains supported |
-| Two self-development proofs | Planned G4 |
-| Stable engine IPC | Planned G5 after E-IPC/ADR |
-| Native C++20/Qt 6 client | Planned G5b |
+Цей документ описує межі й контракти, а не те, який саме capability вже
+прийнятий сьогодні. Актуальна maturity кожного модуля — у
+[`MODULES.md`](MODULES.md); поточний exact SHA, findings і їхній статус —
+виключно у [`TODO.md`](TODO.md).
 
 MilHRMS development не починається до повного local release acceptance,
 визначеного в [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).

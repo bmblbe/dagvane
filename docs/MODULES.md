@@ -1,12 +1,16 @@
 # Модулі Dagvane
 
-Operational map поточного Python package на exact SHA `324f6c5…`. Таблиці
-описують реальний code layout, а не бажану майбутню структуру.
+Operational map поточного Python package: реальний code layout, а не бажана
+майбутня структура. Точний exact SHA, конкретні findings і їхній поточний
+статус — виключно у [`TODO.md`](TODO.md), не тут. Терміни — у
+[`GLOSSARY.md`](GLOSSARY.md).
 
-Позначки maturity:
+Позначки maturity (стабільний словник, не volatile статус):
 
 - **accepted** — пройшло independent exact-SHA acceptance у своєму scope;
-- **candidate / REVISE** — код існує, але load-bearing contract відхилений;
+- **candidate** — код існує, але load-bearing contract ще не прийнятий;
+  поточну дизпозицію дивись у `TODO.md` — цей документ не стверджує, що
+  candidate прийнятий;
 - **partial** — вузький seam існує, повна capability відсутня;
 - **planned** — product implementation ще немає.
 
@@ -32,7 +36,7 @@ Operational map поточного Python package на exact SHA `324f6c5…`. �
 | Відповідальність | Ephemeral registry known credential values, variant generation і text scrubbing. |
 | Inputs/outputs | Secret value registration → scrubbed text. |
 | Effects | Registry живе лише в memory. |
-| Maturity | Component реалізований; **system boundary REVISE**. |
+| Maturity | Component реалізований; **candidate** (boundary status — дивись `TODO.md`). |
 | Тести | `test_secrets.py`, backend hardening tests, agent remediation tests. |
 | Defects | Не всі chat/subprocess persistence paths проходять scrubber; raw crash artifact підтверджений SEC-002. |
 
@@ -54,7 +58,7 @@ Operational map поточного Python package на exact SHA `324f6c5…`. �
 | Код | `src/dagvane/ports/agent.py` |
 | Відповідальність | Request/result для autonomous CLI process із model/reasoning/cwd/timeout. |
 | Implementation | `adapters/agents/subprocess_runner.py`. |
-| Maturity | **candidate / REVISE**. |
+| Maturity | **candidate**. |
 | Defects | Durable identity/fencing, secret boundary, process-tree cancellation та contributor provenance. |
 
 ### Storage ports
@@ -173,7 +177,7 @@ Shared normalization/redaction helpers розташовані в
 | Поле | Значення |
 |---|---|
 | Код | `src/dagvane/adapters/storage/filesystem.py` |
-| Відповідальність | Run layout, gapless journal append, CAS artifacts, manifests і derived views. |
+| Відповідальність | Run layout, gapless journal append, content-addressed artifacts, manifests і derived views. |
 | Effects | Filesystem writes з fsync/atomic ordering. |
 | Maturity | **accepted G0/G1**. |
 | Тести | `test_storage.py`, replay/determinism/failure integration tests. |
@@ -190,7 +194,7 @@ passing happy-path test не означає acceptance.
 | Код | `src/dagvane/application/chat.py` |
 | Відповідальність | File-backed conversation manifest/messages, current pointer, history-window prompt assembly. |
 | Effects | `.dagvane/conversations`, ExternalAgent invocation. |
-| Maturity | **candidate / REVISE**. |
+| Maturity | **candidate**. |
 | Тести | `test_autodev_mvp.py`, remediation integration tests. |
 | Defects | Unvalidated conversation IDs; initial message/title can persist selected-resource secret; full ContextSnapshot absent. |
 
@@ -201,7 +205,7 @@ passing happy-path test не означає acceptance.
 | Код | `src/dagvane/application/goals.py` |
 | Відповідальність | Goal contract, hash/freeze, status, record serialization. |
 | Effects | `.dagvane/goals/<name>/goal.json`. |
-| Maturity | **candidate / REVISE**. |
+| Maturity | **candidate**. |
 | Defects | Goal ID/path containment; cross-file state transitions; amendment path not integrated end-to-end. |
 
 ### Goal preparation
@@ -211,7 +215,7 @@ passing happy-path test не означає acceptance.
 | Код | `src/dagvane/application/prepare.py` |
 | Відповідальність | Derive draft contract from conversation; collect baseline after approval. |
 | Effects | Model/agent call, Git worktree, owner-approved shell commands. |
-| Maturity | Draft-only change implemented, **overall candidate REVISE**. |
+| Maturity | Draft-only change implemented, **candidate**. |
 | Defects | Baseline commands share mutable checkout and can contaminate later evidence. |
 
 ### Resource catalog/router
@@ -240,7 +244,7 @@ passing happy-path test не означає acceptance.
 | Код | `src/dagvane/application/autodev.py` |
 | Відповідальність | Baseline/evaluate → route → implement → commit → verify → review → remediate → terminal outcome. |
 | State | `goal.json`, `run-state.json`, `log.jsonl`, worktree/lease/process metadata. |
-| Maturity | **REVISE: 4 BLOCKER + 7 MAJOR**. |
+| Maturity | **candidate** (findings — дивись `TODO.md`). |
 | Тести | `test_autodev_mvp.py`, `test_autodev_remediation.py`. |
 | Defects | Evidence mutation, cancellation races, contributor identity, reviewer isolation/schema, escalation; див. `TODO.md`. |
 
@@ -271,7 +275,7 @@ passing happy-path test не означає acceptance.
 |---|---|
 | Код | `src/dagvane/workspace/lease.py` |
 | Відповідальність | POSIX non-blocking `flock` навколо Goal runner. |
-| Maturity | Normal-path exclusion реалізовано; **system fencing REVISE**. |
+| Maturity | Normal-path exclusion реалізовано; **candidate** (fencing status — дивись `TODO.md`). |
 | Межі | POSIX-only; NFS ненадійний; lease release не доводить відсутність orphan process. |
 
 ### ExternalAgent subprocess runner
@@ -281,7 +285,7 @@ passing happy-path test не означає acceptance.
 | Код | `src/dagvane/adapters/agents/subprocess_runner.py` |
 | Відповідальність | Запуск Codex/`agy`/test command, prompt/output artifacts, timeout/process identity. |
 | Effects | Process group, minimal environment, `.dagvane/agent-runs`. |
-| Maturity | **candidate / REVISE**. |
+| Maturity | **candidate**. |
 | Defects | Raw output survives parent crash; spawn/record/pump failure leaves writer; recorded PGID lifecycle incomplete. |
 
 ### Local execution
@@ -291,7 +295,7 @@ passing happy-path test не означає acceptance.
 | Код | `src/dagvane/adapters/localexec.py` |
 | Відповідальність | Shell commands, process termination, Git inspection/commit/worktree lifecycle. |
 | Effects | Host shell, Git, filesystem, process groups. |
-| Maturity | **candidate / REVISE**. |
+| Maturity | **candidate**. |
 | Defects | Destructive path not centrally contained; output capture unbounded; process-tree kill incomplete. |
 
 ## Interfaces

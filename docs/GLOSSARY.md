@@ -93,6 +93,7 @@
   виконувати й рецензувати паралельно за замороженим interface contract, але
   ще заборонено інтегрувати або зараховувати як закриття finding. Held-кандидат
   чекає acceptance своєї dependency й тільки тоді може стати merge-authorized.
+  Він збільшує throughput, але не закриває finding, stage або milestone.
 - **acceptance gate** — точка, де незалежний review і власник підтверджують,
   що конкретний exact SHA задовольняє всі required outcomes стадії. До
   проходження gate — це не готова функціональність, навіть якщо код вже
@@ -139,15 +140,30 @@
 - **port / interface contract** — вузька домовленість про те, які методи,
   типи даних, помилки й effects модуль надає назовні. Інші модулі залежать від
   контракту, а не від внутрішньої реалізації.
+- **versioned V1 contract** — найменший корисний frozen contract для поточного
+  bounded slice, а не спроба передбачити повний future API. Сумісне доповнення
+  можна оголосити як capability/minor revision, якщо старі consumers лишаються
+  валідними. Несумісна зміна потребує explicit `V2` і явного migration path;
+  поведінку `V1` не змінюють мовчки. In-process port має публічну version
+  constant і contract tests; durable або wire document має поле
+  `schema_version`.
 - **contract test** — тест, який однаково запускається проти реалізацій одного
   port і доводить їхню сумісність. Це не лише happy-path unit test.
 - **writer** — агент, який має право змінювати один isolated candidate
-  worktree. Writer не рецензує власний candidate.
+  worktree. Кожен candidate має рівно одного writer; alternative writers
+  створюють окремі candidates. Writer не рецензує власний candidate.
+- **independent model review** — review committed candidate зі fresh context
+  моделлю, яка не була його writer. Кожен isolated candidate проходить
+  щонайменше два такі reviews до judge disposition.
 - **judge** — незалежна роль, яка зіставляє review findings із frozen
   contract, класифікує їх і вирішує PASS або remediation. Judge не означає
   автоматичний merge.
+- **remediation loop** — цикл, у якому BLOCKER/MAJOR виправляється в новому
+  candidate SHA, після чого зміна знову проходить independent review і judge.
 - **integrator** — окремий writer, який бере вже прийняті module SHAs і
-  з'єднує їх. Він не переписує внутрішності модулів без нової bounded задачі.
+  з'єднує їх через integration seam. Він не переписує module interface чи
+  внутрішності: потрібну interface-зміну повертає власнику модуля як окрему
+  bounded capability/`V2` задачу з власним review/judge.
 - **glue layer** — малий adapter між двома сумісними, але різними
   інтерфейсами. Glue перетворює форму виклику/даних, але не дублює business
   logic і не приховує порушення contract.

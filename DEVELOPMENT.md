@@ -403,35 +403,49 @@ agy models
 - `docs/architecture/history/**` не редагується.
 - Прийняті ADR не переписуються; нова архітектурна зміна отримує новий ADR.
 
-### Паралельна розробка модулів
+## Як ми паралелимо роботу
 
-Паралельність починається не з кількох агентів у спільному checkout, а з
-чіткого interface contract:
+Паралельність починається з інтерфейсу. Спочатку ми фіксуємо найменший корисний
+versioned контракт `V1`, його типи, порядок effects і contract tests. Ми не
+намагаємося одразу вмістити в нього весь можливий future API.
 
-1. Архітектор фіксує port/interface, типи даних, effect ownership і contract
-   tests.
-2. Один writer реалізує модуль у власному worktree від exact base SHA.
-3. Дві або більше незалежні моделі з fresh context рецензують committed
+Сумісне розширення може лишитися у `V1` як явно оголошена capability або minor
+revision: старий consumer продовжує працювати без змін. Несумісна зміна отримує
+явний `V2` і план переходу; поведінка старого контракту не змінюється мовчки.
+
+Для in-process port версію фіксує публічна константа на кшталт
+`PROCESS_PORT_API_VERSION = 1` і contract tests. Для JSON, NDJSON та іншого
+durable/wire формату версія є обов'язковим полем `schema_version`. Номер не
+замінює опис semantics: для кожної версії тести фіксують значення enum,
+помилки, ownership effects та правила сумісності.
+
+Маленький приклад: `V1` повертає `CaptureResult(text, truncated)`. Якщо пізніше
+потрібен необов'язковий byte count, його можна додати як capability/minor із
+безпечним default. Якщо ж треба несумісно змінити значення `truncated` або error
+semantics, створюємо `V2`, а `V1` лишаємо доступним до явної міграції.
+
+Робочий цикл такий:
+
+1. Архітектор заморожує мінімальний `V1` port/interface і contract tests.
+2. Рівно один writer створює один isolated candidate у власному worktree від
+   exact base SHA.
+3. Щонайменше дві незалежні моделі з fresh context рецензують committed
    candidate; writer не рецензує себе.
-4. Judge класифікує findings. BLOCKER/MAJOR породжує новий remediation SHA і
-   новий exact-SHA review; старий verdict лишається в історії.
-5. Integrator бере тільки accepted module SHAs і з'єднує їх через adapters або
-   малий glue layer. Якщо interface треба змінити, це окрема bounded задача
-   власника модуля, а не прихована переробка integrator-ом.
+4. Judge класифікує findings. Кожен BLOCKER/MAJOR проходить remediation loop на
+   новому SHA і повторний незалежний review; старий verdict лишається в історії.
+5. Лише integrator/glue writer редагує integration seam і з'єднує accepted
+   module SHAs через adapters або малий glue layer. Якщо для цього треба змінити
+   сам module interface, integrator повертає окрему bounded задачу власнику
+   модуля; той випускає сумісну capability або `V2` і проходить власний
+   review/judge до інтеграції.
 6. Інтегрований SHA знову проходить contract tests, повні gates і незалежний
-   review.
+   integration review.
 
-Альтернативні writers одного модуля також працюють лише в окремих worktree.
-Judge обирає candidate за тим самим frozen contract; їхні незакомічені bytes
-ніколи не змішуються. Паралельні модулі не повинні редагувати один файл. Якщо
-межа ще перетинається, спершу виносьте спільну поведінку в port або призначайте
-одного послідовного integrator-а.
-
-Канонічний [`TODO.md`](docs/TODO.md) завжди називає одну merge-authorized
-стадію. Незалежні майбутні модулі можуть бути позначені `PARALLEL-HELD` і
-розроблятися наперед, але їх не можна інтегрувати, приймати як закриття finding
-або використовувати як нову базу до acceptance залежності. Це дозволяє
-паралельність без порушення порядку доказів у roadmap.
+Alternative writers не змішують candidates до judge verdict. Канонічний
+[`TODO.md`](docs/TODO.md) завжди називає одну merge-authorized стадію;
+майбутні модулі позначаються `PARALLEL-HELD`. Це спосіб збільшити throughput,
+а не acceptance: held candidate не можна інтегрувати і він не закриває finding,
+stage або milestone.
 
 ## Troubleshooting
 

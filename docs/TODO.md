@@ -14,12 +14,12 @@ test counts — живе тільки тут. Roadmap (незмінна посл
 | Останній прийнятий product checkpoint | `495b5f1b551642ce3f5bdcbe2853775d00a3fc1d` |
 | Merge-authorized стадія | **R1-A — filesystem identity and path safety** (ідентифікатори та безпека шляхів у файловій системі) |
 | Поточна merge-authorized підзадача | **managed Git worktree ownership** (керовані Git worktree з durable доказом власника) — `ACTIVE` |
-| Паралельні held-підзадачі | **R1-B1** — pure streaming-secret/bounded-capture core; **R1-C0** — pure managed-process port/contract tests. Обидві — `PARALLEL-HELD`, без інтеграції до acceptance залежностей. |
+| Паралельні isolated lanes | **R1-B1** — streaming-secret/bounded-capture core: writer активний, candidate SHA ще немає, `OPEN/PARALLEL-HELD`; **R1-C0** — managed-process port candidate `36f2905d1724f96523675c22c6b2c0bdf885baa5`: judge verdict `REVISE` — 4 MAJOR, bounded remediation обов'язкова, candidate не accepted, `VERIFY/PARALLEL-HELD`; **R1-F0** — strict review-document V1/parser: writer активний, candidate SHA ще немає, `OPEN/PARALLEL-HELD`. Це throughput, не acceptance: жодна lane не закриває finding, stage або milestone і не змінює merge-authorized R1-A. |
 | Наступна інтеграція | Міграція writer/verify/review worktree на прийнятий manager, потім consolidated R1-A acceptance; лише після цього R1-B1 може перейти з held у merge-authorized integration. |
 | Що безпечно користувачу зараз | Тільки прийнятий Council runtime: `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. Все інше — нижче, "Stop gate". |
 | Stop gate | До R1-H жодна workspace-команда (`chat`, `conversations`, `config`, будь-яка `goal`) не дозволена на реальному або цінному репозиторії. |
 | Останній доказ | Process-record checkpoint `495b5f1…` прийнятий independent exact-SHA review: 762 passed, 1 skipped; Ruff/mypy clean; 0 BLOCKER/MAJOR. |
-| Що ще потребує review | Managed Git worktree ownership ще не має candidate. Після двох bounded implementation checkpoints потрібен consolidated SEC-001 adversarial review. |
+| Що ще потребує review | Managed Git worktree ownership ще не має candidate. R1-C0 потребує bounded remediation, нового exact-SHA review і judge; product acceptance відсутній. Після двох bounded implementation checkpoints потрібен consolidated SEC-001 adversarial review. |
 
 ### Candidate SHA проти repository HEAD
 
@@ -63,9 +63,10 @@ SHA в картці не намагається бути самопосилал�
 
 | Status | Значення |
 |---|---|
-| `OPEN` | Outcome визначений, робота не почата. |
+| `OPEN` | У merge-authorized dependency path немає прийнятого checkpoint. Для складеного `OPEN/PARALLEL-HELD` isolated writer уже може працювати, але accepted candidate ще немає. |
 | `ACTIVE` | Поточна bounded робота в єдиній merge-authorized стадії. |
-| `PARALLEL-HELD` | Ізольований модульний candidate можна розробляти й рецензувати паралельно за frozen interface, але не інтегрувати, не приймати як закриття finding і не використовувати як нову базу до acceptance його залежності. |
+| `PARALLEL-HELD` | Ізольований модульний candidate можна розробляти й рецензувати паралельно за frozen interface, але не інтегрувати, не приймати як закриття finding, stage чи milestone і не використовувати як нову базу до acceptance його залежності. |
+| `VERIFY/PARALLEL-HELD` | Held candidate допущено до independent review, але review verdict, owner acceptance і право інтеграції ще відсутні. |
 | `PARTIAL` | Частина outcome закрита прийнятими checkpoints, решта в роботі. |
 | `BLOCKED` | Зовнішня залежність або повторюваний impasse не дає прогресу. |
 | `VERIFY` | Candidate існує; потрібні gates/exact-SHA review. |
@@ -95,7 +96,7 @@ Priority означає порядок усередині recovery, а не пр
 | `RUN-003` | MAJOR — non-linearizable cancellation | P1 | R1-D | `OPEN` |
 | `EVD-001` | BLOCKER — evidence commands author/forge code | P0 | R1-E | `OPEN` |
 | `EVD-002` | MAJOR — baseline contamination | P1 | R1-E | `OPEN` |
-| `REV-001` | MAJOR — review fail-open | P1 | R1-F | `OPEN` |
+| `REV-001` | MAJOR — review fail-open | P1 | R1-F | `OPEN/PARALLEL-HELD` |
 | `PROV-001` | MAJOR — contributor provenance gap | P1 | R1-F | `OPEN` |
 | `RTE-001` | MAJOR — escalation reset/no progress | P1 | R1-G | `OPEN` |
 

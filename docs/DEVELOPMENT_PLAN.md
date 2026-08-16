@@ -19,27 +19,35 @@
 1. Одночасно **merge-authorized** лише одна dependency-ordered стадія. Водночас
    незалежні модульні підзадачі наступних стадій можуть виконуватися як
    `PARALLEL-HELD`: із frozen interface, окремими worktree, непересічними
-   файлами й рівно одним writer на candidate. Такий candidate не можна
-   інтегрувати, приймати як завершення finding або робити новою базою, доки
-   його попередня залежність не пройшла acceptance gate.
-2. Кожна стадія й кожна `PARALLEL-HELD` підзадача має clean pinned base SHA,
+   файлами й рівно одним writer на isolated candidate. Це збільшує throughput,
+   але не закриває finding, stage або milestone. Такий candidate не можна
+   інтегрувати або робити новою базою, доки його попередня залежність не пройшла
+   acceptance gate.
+2. Робота interface-first починається з найменшого корисного versioned `V1`
+   contract і contract tests, а не з повного future API. Сумісні доповнення
+   оформлюються як capability/minor revision; несумісні — як explicit `V2` із
+   переходом. Старий контракт не можна ламати мовчки.
+3. Кожна стадія й кожна `PARALLEL-HELD` підзадача має clean pinned base SHA,
    explicit deliverables, tests,
    non-goals і max scope.
-3. Жоден implementation agent не отримує весь цей план як одну задачу.
-4. Candidate повністю committed; verification і review посилаються на exact
+4. Жоден implementation agent не отримує весь цей план як одну задачу.
+5. Candidate повністю committed; verification і review посилаються на exact
    SHA, а не на назву гілки.
-5. BLOCKER або MAJOR зупиняє прогрес цієї стадії, доки не закритий.
-6. MINOR не створює автоматично дорогий remediation cycle; він потрапляє в
+6. Кожен isolated candidate проходить review щонайменше двох незалежних
+   моделей, judge disposition і, для BLOCKER/MAJOR, remediation loop на новому
+   SHA з повторним review.
+7. MINOR не створює автоматично дорогий remediation cycle; він потрапляє в
    TODO з disposition.
-7. Owner зберігає merge/push/integration authority.
-8. Архітектура наступної стадії деталізується безпосередньо перед її
+8. Owner зберігає merge/push/integration authority.
+9. Архітектура наступної стадії деталізується безпосередньо перед її
    реалізацією, не на кілька стадій наперед.
-9. Кожна стадія оновлює [`TODO.md`](TODO.md); статуси й counts не
+10. Кожна стадія оновлює [`TODO.md`](TODO.md); статуси й counts не
    дублюються по інших docs.
-10. Конкурентні реалізації одного interface дозволені лише як окремі
-    committed candidates. Незалежні reviewers перевіряють їх у fresh context,
-    judge фіксує disposition, а integrator бере тільки accepted SHA й з'єднує
-    модулі через визначені adapters або малий glue layer.
+11. Конкурентні реалізації одного interface дозволені лише як окремі committed
+    candidates. Тільки integrator/glue writer редагує integration seam і
+    з'єднує accepted SHA після acceptance dependencies. Потрібна зміна module
+    interface повертається його власнику як окрема bounded задача: сумісна
+    capability або explicit `V2` проходить власний review/judge до інтеграції.
 
 Стандартний code gate для будь-якої стадії:
 

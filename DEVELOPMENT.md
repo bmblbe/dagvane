@@ -403,6 +403,30 @@ agy models
 - `docs/architecture/history/**` не редагується.
 - Прийняті ADR не переписуються; нова архітектурна зміна отримує новий ADR.
 
+### Паралельна розробка модулів
+
+Паралельність починається не з кількох агентів у спільному checkout, а з
+чіткого interface contract:
+
+1. Архітектор фіксує port/interface, типи даних, effect ownership і contract
+   tests.
+2. Один writer реалізує модуль у власному worktree від exact base SHA.
+3. Дві або більше незалежні моделі з fresh context рецензують committed
+   candidate; writer не рецензує себе.
+4. Judge класифікує findings. BLOCKER/MAJOR породжує новий remediation SHA і
+   новий exact-SHA review; старий verdict лишається в історії.
+5. Integrator бере тільки accepted module SHAs і з'єднує їх через adapters або
+   малий glue layer. Якщо interface треба змінити, це окрема bounded задача
+   власника модуля, а не прихована переробка integrator-ом.
+6. Інтегрований SHA знову проходить contract tests, повні gates і незалежний
+   review.
+
+Альтернативні writers одного модуля також працюють лише в окремих worktree.
+Judge обирає candidate за тим самим frozen contract; їхні незакомічені bytes
+ніколи не змішуються. Паралельні модулі не повинні редагувати один файл. Якщо
+межа ще перетинається, спершу виносьте спільну поведінку в port або призначайте
+одного послідовного integrator-а.
+
 ## Troubleshooting
 
 | Симптом | Ймовірна причина | Що робити |

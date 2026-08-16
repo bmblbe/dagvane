@@ -148,6 +148,7 @@ def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
     assert "4 BLOCKER" in todo
     assert "7 MAJOR" in todo
     assert "7c9d982caed501605caa72e474651ba907b2bf18" in todo
+    assert "source SHA, не поточний `main`" in todo
     assert "495b5f1b551642ce3f5bdcbe2853775d00a3fc1d" in todo
     assert "R1-A" in todo
     assert "process-record authority" in todo.lower()

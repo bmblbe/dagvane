@@ -317,6 +317,12 @@ Parallel readers можуть інспектувати один repo. Parallel w
 редагувати один working tree; кожен writer потребує isolated candidate і
 immutable reviewed SHA.
 
+Паралельні модулі розвиваються interface-first: frozen port і contract tests
+передують implementation. Кожен module candidate проходить competitive
+multi-model review; integrator з'єднує лише accepted SHAs через adapter/glue
+layer. Glue не має права приховувати порушення module contract або переносити
+business logic із engine до CLI/GUI.
+
 Production ExternalAgent допускається лише після native secure
 implementation slice та окремого E-AGENT probe. Без доведеного OS
 write-containment він може бути тільки supervised patch-artifact worker, не

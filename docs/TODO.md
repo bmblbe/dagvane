@@ -10,7 +10,7 @@ test counts — живе тільки тут. Roadmap (незмінна посл
 
 | Що | Значення |
 |---|---|
-| Репозиторій, HEAD цієї docs-гілки | `7c9d982caed501605caa72e474651ba907b2bf18` |
+| Baseline документаційного reset | `7c9d982caed501605caa72e474651ba907b2bf18` (source SHA, не поточний `main`) |
 | Останній прийнятий product checkpoint | `495b5f1b551642ce3f5bdcbe2853775d00a3fc1d` |
 | Активна стадія | **R1-A — filesystem identity and path safety** (ідентифікатори та безпека шляхів у файловій системі) |
 | Поточна підзадача | **managed Git worktree ownership** (керовані Git worktree з durable доказом власника) — `ACTIVE` |
@@ -27,9 +27,10 @@ test counts — живе тільки тут. Roadmap (незмінна посл
 (`288e172…` → `93fac31…` → відхилені `6988788…`, `69ccf6a…` →
 `495b5f1…`) і стає частиною
 `main`/HEAD лише після окремого owner integration gate (див.
-[`DEVELOPMENT.md`](../DEVELOPMENT.md), розділ "Git та review policy"). Docs-only
-гілка тут базована на іншому HEAD (`7c9d982…`) і не змінює та не приймає
-product code цих checkpoints.
+[`DEVELOPMENT.md`](../DEVELOPMENT.md), розділ "Git та review policy"). Цей
+документаційний reset був підготовлений від source SHA `7c9d982…`; саме тому
+SHA в картці не намагається бути самопосилальним «поточним HEAD». Зміна
+документації не змінює й не приймає product code цих checkpoints.
 
 ## Baseline
 

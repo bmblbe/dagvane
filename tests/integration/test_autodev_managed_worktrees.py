@@ -189,6 +189,7 @@ def _state(comp: Composition, record: GoalRecord) -> RunState:
         status="running",
         started_ts=comp.clock.now_iso(),
         implement_resource_id="writer",
+        pending_writer_resource_id="writer",
     )
 
 
@@ -1026,6 +1027,71 @@ def test_candidate_commit_uses_two_phase_manager_checkpoint(
     ]
     assert state.candidate_sha == candidate
     assert GitOps.head_sha(candidate_path) == candidate
+
+
+def test_candidate_noop_clears_pending_without_polluting_contributors(
+    tmp_path: Path,
+) -> None:
+    comp, record = _composition(tmp_path)
+    manager = _manager(comp)
+    state = _state(comp, record)
+    state.candidate_sha = None
+    state.pending_writer_resource_id = "noop-writer"
+    state.contributor_resource_ids = ["writer"]
+    runner = _runner(comp, manager=manager)
+    use = runner._open_candidate_worktree(record, state)  # noqa: SLF001
+    assert use is not None
+    try:
+        candidate, advanced = runner._commit_candidate(  # noqa: SLF001
+            record, state, use, "no-op attempt"
+        )
+    finally:
+        runner._close_candidate_worktree()  # noqa: SLF001
+
+    assert candidate == record.contract.base_sha
+    assert not advanced
+    assert state.pending_writer_resource_id is None
+    assert state.contributor_resource_ids == ["writer"]
+
+
+def test_resume_rejects_unattributable_advanced_candidate(
+    tmp_path: Path,
+) -> None:
+    comp, record = _composition(tmp_path)
+    manager = _manager(comp)
+    state = _state(comp, record)
+    state.pending_writer_resource_id = None
+    state.contributor_resource_ids = []
+    candidate_path = comp.workspace.worktrees_dir / "goal-a-run-1"
+    _git(
+        ["commit", "--allow-empty", "-q", "-m", "unattributed candidate"],
+        comp.workspace.root,
+    )
+    recovered_sha = GitOps.head_sha(comp.workspace.root)
+    _git(
+        [
+            "worktree",
+            "add",
+            "--detach",
+            "--",
+            str(candidate_path),
+            recovered_sha,
+        ],
+        comp.workspace.root,
+    )
+    lease = _ProtocolLease(candidate_path, recovered_sha)
+    lifecycle = _RecoveryLifecycle(lease)
+    runner = _runner(
+        comp,
+        manager=manager,
+        candidate=cast(CandidateWorktreeLifecycleV2, lifecycle),
+    )
+    record.status = GoalStatus.RUNNING
+    comp.goals.save("goal-a", record)
+    runner._save_state(record, state)  # noqa: SLF001
+
+    with pytest.raises(StorageError, match="unattributable"):
+        runner.resume("goal-a")
 
 
 def test_candidate_shell_swap_cannot_execute_in_foreign_directory(

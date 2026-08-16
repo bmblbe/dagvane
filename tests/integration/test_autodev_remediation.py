@@ -26,6 +26,7 @@ import pytest
 
 from dagvane.adapters.localexec import GitOps
 from dagvane.adapters.worktrees import ManagedWorktrees, WorktreePurpose, WorktreeSpec
+from dagvane.application import autodev as autodev_module
 from dagvane.application.autodev import RunState
 from dagvane.application.goals import (
     AcceptanceCheck,
@@ -37,6 +38,7 @@ from dagvane.application.goals import (
     approve,
 )
 from dagvane.application.prepare import collect_baseline, prepare_goal
+from dagvane.application.resources import ResourceSpec, RoutingDecision, route_task
 from dagvane.cli import main
 from dagvane.cli_workspace import Composition, _goal_runner
 from dagvane.domain.models import SpecError
@@ -924,6 +926,7 @@ def test_review_is_bound_to_the_exact_candidate_sha(tmp_path: Path) -> None:
 
     assert status is GoalStatus.ACHIEVED
     state = _run_state(comp, "bound-review")
+    assert state["contributor_resource_ids"] == ["fake-writer"]
     candidate = state["candidate_sha"]
     assert state["tested_sha"] == candidate
     entry = state["reviews"][-1]
@@ -954,6 +957,231 @@ def test_review_is_bound_to_the_exact_candidate_sha(tmp_path: Path) -> None:
     assert candidate in review_prompts[0]
     assert record.contract.base_sha in review_prompts[0]
     assert str(entry["diff_sha256"]) in review_prompts[0]
+
+
+def test_pending_writer_is_durable_before_commit_state_and_excluded_on_resume(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    _init_repo(root)
+    writer = _agent_script(tmp_path, "writer.py", MARKER_WRITER)
+    reviewer = _agent_script(
+        tmp_path,
+        "reviewer.py",
+        "output.write_text(json.dumps({'findings': []}), encoding='utf-8')\n",
+    )
+    _write_config(
+        root,
+        resources={
+            "fake-writer": _resource(writer),
+            "fake-reviewer": _resource(reviewer, tier="STRONG"),
+        },
+        goal={
+            "implement_resource": "fake-writer",
+            "review_resource": "fake-reviewer",
+            "review_policy": "always",
+        },
+    )
+    comp = Composition(root)
+    record = _approved_goal(comp, "pending-commit", checks=[("marker", "test -f marker.txt")])
+    runner = _goal_runner(comp)
+    original_save = runner._save_state
+
+    def crash_after_commit(record_arg: GoalRecord, state_arg: RunState) -> None:
+        if (
+            state_arg.pending_writer_resource_id is None
+            and state_arg.contributor_resource_ids == ["fake-writer"]
+            and state_arg.candidate_sha != record_arg.contract.base_sha
+        ):
+            raise KeyboardInterrupt("crash after managed commit")
+        original_save(record_arg, state_arg)
+
+    runner._save_state = crash_after_commit  # type: ignore[assignment]
+    with pytest.raises(KeyboardInterrupt, match="crash after managed commit"):
+        runner.start("pending-commit")
+
+    crashed = _run_state(comp, "pending-commit")
+    assert crashed["pending_writer_resource_id"] == "fake-writer"
+    assert crashed["contributor_resource_ids"] == []
+
+    comp2 = Composition(root)
+    assert _goal_runner(comp2).resume("pending-commit") is GoalStatus.ACHIEVED
+    state = _run_state(comp2, "pending-commit")
+    assert state["pending_writer_resource_id"] is None
+    assert state["contributor_resource_ids"] == ["fake-writer"]
+    assert state["reviews"][-1]["resource"] == "fake-reviewer"
+    assert state["reviews"][-1]["valid"] is True
+    assert state["candidate_sha"] != record.contract.base_sha
+
+
+def test_pending_dirty_bytes_are_discarded_before_resume_attempt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    _init_repo(root)
+    writer = _agent_script(
+        tmp_path,
+        "retrying-writer.py",
+        """
+call = bump("writer-calls")
+if call == 1:
+    Path("partial.txt").write_text("discard me\\n", encoding="utf-8")
+else:
+    Path("marker.txt").write_text("complete\\n", encoding="utf-8")
+output.write_text("writer output", encoding="utf-8")
+""",
+    )
+    _write_config(
+        root,
+        resources={"fake-writer": _resource(writer)},
+        goal={
+            "implement_resource": "fake-writer",
+            "review_policy": "never",
+        },
+    )
+    comp = Composition(root)
+    _approved_goal(comp, "pending-dirty", checks=[("marker", "test -f marker.txt")])
+    runner = _goal_runner(comp)
+    original_commit = runner._commit_candidate
+
+    def crash_with_dirty_bytes(
+        record_arg: GoalRecord,
+        state_arg: RunState,
+        use: Any,
+        message: str,
+    ) -> tuple[str, bool]:
+        if not GitOps.is_clean(use.path):
+            raise KeyboardInterrupt("crash after writer bytes")
+        return original_commit(record_arg, state_arg, use, message)
+
+    runner._commit_candidate = crash_with_dirty_bytes  # type: ignore[assignment]
+    with pytest.raises(KeyboardInterrupt, match="crash after writer bytes"):
+        runner.start("pending-dirty")
+
+    comp2 = Composition(root)
+    assert _goal_runner(comp2).resume("pending-dirty") is GoalStatus.ACHIEVED
+    state = _run_state(comp2, "pending-dirty")
+    assert state["contributor_resource_ids"] == ["fake-writer"]
+    worktree = Path(state["worktree"])
+    assert not (worktree / "partial.txt").exists()
+    assert (worktree / "marker.txt").read_text(encoding="utf-8") == "complete\n"
+
+
+@pytest.mark.parametrize("invalid_id", ["", None])
+def test_empty_or_null_writer_id_is_rejected_before_pending_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_id: Any,
+) -> None:
+    comp = _marker_goal_composition(tmp_path, "invalid-writer")
+    real_route = route_task
+    calls = {"save": 0}
+    runner = _goal_runner(comp)
+    original_save = runner._save_state
+
+    def counting_save(record_arg: GoalRecord, state_arg: RunState) -> None:
+        calls["save"] += 1
+        original_save(record_arg, state_arg)
+
+    runner._save_state = counting_save  # type: ignore[assignment]
+
+    def invalid_route(catalog: Any, task_kind: str, **kwargs: Any) -> RoutingDecision:
+        if task_kind in ("implement", "remediate"):
+            return RoutingDecision(
+                resource=ResourceSpec(
+                    resource_id=invalid_id,
+                    kind="external_agent",
+                    runtime="command",
+                    tier="STANDARD",
+                ),
+                tier="STANDARD",
+                reason="invalid test writer",
+            )
+        return real_route(catalog, task_kind, **kwargs)
+
+    monkeypatch.setattr(autodev_module, "route_task", invalid_route)
+    with pytest.raises(SpecError, match="writer resource_id"):
+        runner.start("invalid-writer")
+
+    state = _run_state(comp, "invalid-writer")
+    assert state["pending_writer_resource_id"] is None
+    assert state["agent_calls"] == 0
+    assert calls["save"] > 0
+
+
+def test_two_contributors_make_either_reviewer_fatal_without_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    _init_repo(root)
+    writer_a = _agent_script(
+        tmp_path,
+        "writer-a.py",
+        'Path("irrelevant-a.txt").write_text("a\\n", encoding="utf-8")\n'
+        'output.write_text("a", encoding="utf-8")\n',
+    )
+    writer_b = _agent_script(
+        tmp_path,
+        "writer-b.py",
+        'Path("marker.txt").write_text("b\\n", encoding="utf-8")\n'
+        'output.write_text("b", encoding="utf-8")\n',
+    )
+    reviewer = _agent_script(
+        tmp_path,
+        "reviewer.py",
+        "output.write_text(json.dumps({'findings': []}), encoding='utf-8')\n",
+    )
+    _write_config(
+        root,
+        resources={
+            "writer-a": _resource(writer_a),
+            "writer-b": _resource(writer_b),
+            "reviewer": _resource(reviewer, tier="STRONG"),
+        },
+        goal={
+            "review_resource": "writer-a",
+            "review_policy": "always",
+        },
+    )
+    comp = Composition(root)
+    _approved_goal(
+        comp,
+        "two-contributors",
+        checks=[("marker", "test -f marker.txt")],
+        max_attempts=3,
+    )
+    real_route = route_task
+
+    def alternating_route(catalog: Any, task_kind: str, **kwargs: Any) -> Any:
+        if task_kind in ("implement", "remediate"):
+            resource_id = "writer-a" if kwargs["attempt"] == 1 else "writer-b"
+            return RoutingDecision(
+                resource=catalog.get(resource_id),
+                tier=catalog.get(resource_id).tier,
+                reason=f"test route {resource_id}",
+            )
+        return real_route(catalog, task_kind, **kwargs)
+
+    monkeypatch.setattr(autodev_module, "route_task", alternating_route)
+    status = _goal_runner(comp).start("two-contributors")
+
+    assert status is GoalStatus.FAILED
+    state = _run_state(comp, "two-contributors")
+    assert state["contributor_resource_ids"] == ["writer-a", "writer-b"]
+    assert state["reviews"] == []
+    assert "contributor set" in str(_goal_doc(comp, "two-contributors")["evidence"]["reason"])
+
+    # The same durable set rejects the other contributor as well, without
+    # creating a review checkout or append-only review entry.
+    comp.config.set("goal.review_resource", '"writer-b"')
+    record = comp.goals.load("two-contributors")
+    state_obj = RunState.from_doc(state)
+    kind, _blocking, reason = _goal_runner(comp)._review_candidate(  # noqa: SLF001
+        record, state_obj, str(state["candidate_sha"])
+    )
+    assert kind == "fatal"
+    assert "contributor set" in reason
 
 
 def test_reviewer_mutating_the_pinned_checkout_fails_closed(tmp_path: Path) -> None:

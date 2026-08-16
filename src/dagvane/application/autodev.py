@@ -184,6 +184,12 @@ _MAX_REVIEW_FAILURES = 2
 _EVIDENCE_TAIL_CHARS = 2000
 
 
+def _validated_resource_id(resource_id: object, *, ctx: str) -> str:
+    if not isinstance(resource_id, str) or not resource_id:
+        raise SpecError(f"{ctx} must be a non-empty string")
+    return resource_id
+
+
 @dataclass(slots=True)
 class RunState:
     """Durable goal-run state: the resume contract.
@@ -214,11 +220,41 @@ class RunState:
     verify_ok: bool | None = None
     verification: dict[str, object] | None = None
     implement_resource_id: str | None = None
+    pending_writer_resource_id: str | None = None
+    contributor_resource_ids: list[str] = field(default_factory=list)
     finish_reason: str | None = None
 
     def __post_init__(self) -> None:
         validate_filesystem_id(self.run_id, ctx="run state: run_id")
         validate_filesystem_id(self.goal_name, ctx="run state: goal_name")
+        if self.pending_writer_resource_id == "":
+            raise SpecError(
+                "run state: pending_writer_resource_id must be a non-empty string "
+                "or null"
+            )
+        if self.pending_writer_resource_id is not None and not isinstance(
+            self.pending_writer_resource_id, str
+        ):
+            raise SpecError(
+                "run state: pending_writer_resource_id must be a non-empty string "
+                "or null"
+            )
+        if not isinstance(self.contributor_resource_ids, list):
+            raise SpecError(
+                "run state: contributor_resource_ids must be a list of strings"
+            )
+        if any(
+            not isinstance(resource_id, str) or not resource_id
+            for resource_id in self.contributor_resource_ids
+        ):
+            raise SpecError(
+                "run state: contributor_resource_ids must contain only non-empty "
+                "strings"
+            )
+        if self.contributor_resource_ids != sorted(set(self.contributor_resource_ids)):
+            raise SpecError(
+                "run state: contributor_resource_ids must be sorted and unique"
+            )
 
     def to_doc(self) -> dict[str, object]:
         return {
@@ -243,6 +279,8 @@ class RunState:
             "verify_ok": self.verify_ok,
             "verification": self.verification,
             "implement_resource_id": self.implement_resource_id,
+            "pending_writer_resource_id": self.pending_writer_resource_id,
+            "contributor_resource_ids": list(self.contributor_resource_ids),
             "finish_reason": self.finish_reason,
         }
 
@@ -280,9 +318,42 @@ class RunState:
                 return None
             return validate_worktree_sha(value, ctx=f"run state: {key}")
 
+        def opt_resource_id(key: str) -> str | None:
+            if key not in doc or doc[key] is None:
+                return None
+            value = doc[key]
+            if not isinstance(value, str) or not value:
+                raise SpecError(
+                    f"run state: {key!r} must be a non-empty string or null, got "
+                    f"{type(value).__name__}"
+                )
+            return value
+
+        def resource_ids(key: str) -> list[str]:
+            if key not in doc:
+                return []
+            value = doc[key]
+            if not isinstance(value, list):
+                raise SpecError(
+                    f"run state: {key!r} must be a list of non-empty strings, "
+                    f"got {type(value).__name__}"
+                )
+            if any(not isinstance(item, str) or not item for item in value):
+                raise SpecError(
+                    f"run state: {key!r} must contain only non-empty strings"
+                )
+            parsed = list(value)
+            if parsed != sorted(set(parsed)):
+                raise SpecError(
+                    f"run state: {key!r} must be sorted and unique"
+                )
+            return parsed
+
         candidate_sha = opt_sha("candidate_sha")
         tested_sha = opt_sha("tested_sha")
         review_passed_for = opt_sha("review_passed_for")
+        pending_writer_resource_id = opt_resource_id("pending_writer_resource_id")
+        contributor_resource_ids = resource_ids("contributor_resource_ids")
         if tested_sha is not None and tested_sha != candidate_sha:
             raise SpecError(
                 "run state: tested_sha must equal the persisted candidate_sha"
@@ -341,6 +412,8 @@ class RunState:
                 if isinstance(doc.get("implement_resource_id"), str)
                 else None
             ),
+            pending_writer_resource_id=pending_writer_resource_id,
+            contributor_resource_ids=contributor_resource_ids,
             finish_reason=(
                 doc.get("finish_reason")
                 if isinstance(doc.get("finish_reason"), str)
@@ -834,10 +907,18 @@ class GoalRunner:
                 # captured its authoritative SHA. Recover an existing
                 # generation before terminalizing cancellation; do not create
                 # a new candidate solely for a cancelled run.
+                attempt_base_sha = state.candidate_sha or record.contract.base_sha
                 candidate = self._open_candidate_worktree(
                     record, state, create_if_missing=False
                 )
                 if candidate is not None:
+                    self._reconcile_pending_attempt(
+                        record,
+                        state,
+                        candidate,
+                        attempt_base_sha=attempt_base_sha,
+                        enforce_unattributed=False,
+                    )
                     self._close_candidate_worktree()
                 return self._finish(
                     record, state, GoalStatus.CANCELLED, "cancelled by owner"
@@ -848,12 +929,19 @@ class GoalRunner:
                     f"{state.run_id} cannot resume"
                 )
             self._reap_orphan_writer(goal_name)
+            attempt_base_sha = state.candidate_sha or record.contract.base_sha
             candidate = self._open_candidate_worktree(record, state)
             assert candidate is not None
             try:
                 # Candidate recovery/state reconciliation precedes optional
                 # availability probes and resume logging. No effect can use a
                 # stale RunState SHA after an interrupted managed advance.
+                self._reconcile_pending_attempt(
+                    record,
+                    state,
+                    candidate,
+                    attempt_base_sha=attempt_base_sha,
+                )
                 self._probe_local_model()
                 self._store.log_event(
                     goal_name, {"event": "run.resumed", "run_id": state.run_id}
@@ -880,6 +968,86 @@ class GoalRunner:
 
     def _cancel_requested(self, goal_name: str) -> bool:
         return self._store.load(goal_name).status is GoalStatus.CANCELLED
+
+    def _reconcile_pending_attempt(
+        self,
+        record: GoalRecord,
+        state: RunState,
+        use: _CandidateWorktreeUse,
+        *,
+        attempt_base_sha: str,
+        enforce_unattributed: bool = True,
+    ) -> None:
+        """Reconcile an interrupted writer attempt before resuming work.
+
+        ``attempt_base_sha`` is captured before managed lifecycle recovery. It
+        lets this method distinguish a recovered commit made by the pending
+        attempt from a clean no-op on an already-advanced candidate.
+        """
+        worktree = self._prove_candidate_for_use(use)
+        with self._pinned_git_authority(use.handle) as _identity:
+            clean = GitOps.is_clean(worktree)
+            head = GitOps.head_sha(worktree)
+
+        pending = state.pending_writer_resource_id
+        if pending is not None:
+            if not clean:
+                # The manager's live binding is authoritative. Reset to that
+                # binding, not to a persisted/stale pathname or SHA, then
+                # remove ignored/untracked bytes as part of the same discard.
+                with self._pinned_git_authority(use.handle) as _identity:
+                    GitOps.reset_hard_and_clean(worktree, use.sha)
+                    if GitOps.head_sha(worktree) != use.sha or not GitOps.is_clean(
+                        worktree
+                    ):
+                        raise StorageError(
+                            "pending writer bytes could not be discarded cleanly"
+                        )
+                if state.candidate_sha != use.sha:
+                    state.candidate_sha = use.sha
+                    state.tested_sha = None
+                    state.verification = None
+                    state.verify_ok = None
+                state.pending_writer_resource_id = None
+                self._save_state(record, state)
+                return
+
+            if head != attempt_base_sha:
+                if state.candidate_sha != use.sha:
+                    state.candidate_sha = use.sha
+                    state.tested_sha = None
+                    state.verification = None
+                    state.verify_ok = None
+                state.contributor_resource_ids = sorted(
+                    {*state.contributor_resource_ids, pending}
+                )
+                state.implement_resource_id = pending
+            state.pending_writer_resource_id = None
+            self._save_state(record, state)
+            return
+
+        if not enforce_unattributed:
+            if head != attempt_base_sha or state.candidate_sha != use.sha:
+                state.candidate_sha = use.sha
+                state.tested_sha = None
+                state.verification = None
+                state.verify_ok = None
+                self._save_state(record, state)
+            return
+        if not clean:
+            raise StorageError(
+                "candidate has uncommitted bytes without a pending writer "
+                "attribution"
+            )
+        if head != attempt_base_sha:
+            raise StorageError(
+                "candidate HEAD advanced without a pending writer attribution; "
+                "refusing to continue with an unattributable commit"
+            )
+        if head != record.contract.base_sha and not state.contributor_resource_ids:
+            raise StorageError(
+                "candidate commit is not covered by the durable contributor set"
+            )
 
     # -- the fixed workflow ------------------------------------------------
 
@@ -1001,12 +1169,27 @@ class GoalRunner:
             # Manager truth wins during crash recovery. Persist it before any
             # check/shell/agent effect; the prior state SHA is only an
             # assertion supplied to acquisition, never lifecycle authority.
-            if state.candidate_sha != handle.bound_sha:
-                state.candidate_sha = handle.bound_sha
+            prior_candidate_sha = state.candidate_sha or record.contract.base_sha
+            if (
+                handle.bound_sha == record.contract.base_sha
+                and prior_candidate_sha != record.contract.base_sha
+            ):
+                # The candidate base has been deliberately reset. Provenance
+                # belongs to the old candidate and must not leak into this
+                # fresh base.
+                state.contributor_resource_ids = []
+            candidate_sha_changed = state.candidate_sha != handle.bound_sha
+            if not candidate_sha_changed:
+                self._save_state(record, state)
+            else:
+                # Do not overwrite the pre-attempt candidate SHA before
+                # resume reconciliation can distinguish a recovered commit
+                # from a clean no-op. The reconciliation helper persists the
+                # manager's newer binding together with its attribution (or
+                # the fail-closed result).
                 state.tested_sha = None
                 state.verification = None
                 state.verify_ok = None
-            self._save_state(record, state)
             self._progress(
                 f"worktree   {handle.path} @ {handle.bound_sha[:12]} (managed)"
             )
@@ -1076,7 +1259,7 @@ class GoalRunner:
         use: _CandidateWorktreeUse,
         message: str,
     ) -> tuple[str, bool]:
-        """Two-phase managed commit, followed by exact run-state persistence."""
+        """Two-phase managed commit followed by attributed state persistence."""
         old_sha = use.sha
         worktree = self._prove_candidate_for_use(use, expected_sha=old_sha)
         with self._pinned_git_authority(use.handle) as _identity:
@@ -1092,6 +1275,11 @@ class GoalRunner:
             candidate = old_sha
             advanced = False
         else:
+            if state.pending_writer_resource_id is None:
+                raise StorageError(
+                    "candidate has uncommitted bytes without a pending writer "
+                    "attribution"
+                )
             token = use.lifecycle.begin_sha_advance(
                 use.handle, expected_old_sha=old_sha
             )
@@ -1118,11 +1306,31 @@ class GoalRunner:
             advanced = True
         if not advanced:
             self._prove_candidate_for_use(use, expected_sha=candidate)
-        if state.candidate_sha != candidate:
+        candidate_changed = state.candidate_sha != candidate
+        had_pending = state.pending_writer_resource_id is not None
+        if advanced:
+            pending = state.pending_writer_resource_id
+            if pending is None:
+                raise StorageError(
+                    "candidate advanced without a pending writer attribution"
+                )
+            state.contributor_resource_ids = sorted(
+                {*state.contributor_resource_ids, pending}
+            )
+            state.implement_resource_id = pending
+            state.pending_writer_resource_id = None
+        elif state.pending_writer_resource_id is not None:
+            # A no-op attempt is not a contribution. Preserve all prior
+            # contributors while clearing only this attempt's pending marker.
+            state.pending_writer_resource_id = None
+        if candidate_changed:
             state.candidate_sha = candidate
             state.tested_sha = None
             state.verification = None
             state.verify_ok = None
+        if candidate_changed or advanced or had_pending:
+            # Candidate advancement and pending clearing are persisted in the
+            # same atomic state write.
             self._save_state(record, state)
         return candidate, advanced
 
@@ -1384,6 +1592,9 @@ class GoalRunner:
                 attempt=state.consecutive_failures + 1,
                 preferred_resource=preferred,
             )
+            writer_resource_id = _validated_resource_id(
+                decision.resource.resource_id, ctx="implementation writer resource_id"
+            )
             worktree = self._prove_candidate_for_use(candidate_worktree)
             try:
                 with self._pinned_git_authority(candidate_worktree.handle) as _identity:
@@ -1401,6 +1612,10 @@ class GoalRunner:
                 f"task       attempt {state.attempts}: "
                 f"{task_kind} ({len(unmet)} unmet)"
             )
+            # This is the durable attribution for the in-flight attempt. It
+            # must exist before _invoke_agent can produce any worktree bytes.
+            state.pending_writer_resource_id = writer_resource_id
+            self._save_state(record, state)
             try:
                 self._invoke_agent(
                     record,
@@ -1412,17 +1627,29 @@ class GoalRunner:
                     candidate_worktree=candidate_worktree,
                 )
             except SpecError as exc:
+                self._reconcile_pending_attempt(
+                    record,
+                    state,
+                    candidate_worktree,
+                    attempt_base_sha=candidate_worktree.sha,
+                )
                 state.consecutive_failures += 1
                 self._save_state(record, state)
                 self._store.log_event(
                     state.goal_name, {"event": "attempt.failed", "error": str(exc)}
                 )
                 continue
-            state.implement_resource_id = decision.resource.resource_id
 
             # Never commit post-cancel work: the writer may have been
             # terminated by `goal cancel`; its partial bytes stay uncommitted.
             if self._cancel_requested(state.goal_name):
+                self._reconcile_pending_attempt(
+                    record,
+                    state,
+                    candidate_worktree,
+                    attempt_base_sha=candidate_worktree.sha,
+                    enforce_unattributed=False,
+                )
                 return self._finish(
                     record,
                     state,
@@ -1711,19 +1938,29 @@ class GoalRunner:
             attempt=state.review_failures + 1,
             preferred_resource=preferred,
         )
-        implementer = state.implement_resource_id
-        if implementer is None:
-            implement_raw = self._config.get("goal.implement_resource")
-            implementer = (
-                implement_raw if isinstance(implement_raw, str) else None
+        contributor_ids = state.contributor_resource_ids
+        if not isinstance(contributor_ids, list) or any(
+            not isinstance(resource_id, str) or not resource_id
+            for resource_id in contributor_ids
+        ) or contributor_ids != sorted(set(contributor_ids)):
+            raise SpecError(
+                "run state: contributor_resource_ids is not a validated list"
             )
-        if implementer is not None and decision.resource.resource_id == implementer:
+        excluded = set(contributor_ids)
+        implement_raw = self._config.get("goal.implement_resource")
+        if isinstance(implement_raw, str) and implement_raw:
+            excluded.add(implement_raw)
+        reviewer_resource_id = _validated_resource_id(
+            decision.resource.resource_id, ctx="reviewer resource_id"
+        )
+        if reviewer_resource_id in excluded:
             return (
                 "fatal",
                 [],
-                f"reviewer resource {decision.resource.resource_id!r} equals "
-                "the implementation writer; independent review requires a "
-                "distinct resource (configure goal.review_resource)",
+                f"reviewer resource {reviewer_resource_id!r} is in the "
+                "candidate contributor set; independent review requires a "
+                "distinct resource outside the candidate's contributor set "
+                "(configure goal.review_resource)",
             )
         spec = WorktreeSpec(
             goal_name=state.goal_name,
@@ -1737,7 +1974,7 @@ class GoalRunner:
             "ts": self._clock.now_iso(),
             "candidate_sha": candidate,
             "base_sha": state.base_sha,
-            "resource": decision.resource.resource_id,
+            "resource": reviewer_resource_id,
             "valid": False,
             "findings": [],
         }

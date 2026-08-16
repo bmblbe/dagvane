@@ -464,6 +464,12 @@ class GitOps:
         return GitOps.head_sha(worktree)
 
     @staticmethod
+    def reset_hard_and_clean(worktree: Path, sha: str) -> None:
+        """Discard candidate bytes using the already-pinned Git authority."""
+        _git(["reset", "--hard", sha], worktree)
+        _git(["clean", "-fd"], worktree)
+
+    @staticmethod
     def tracked_dirty(worktree: Path) -> list[str]:
         """Porcelain lines for *tracked* modifications (untracked ``??``
         entries excluded): the fail-closed signal that a check or verify

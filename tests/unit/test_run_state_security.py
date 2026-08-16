@@ -214,6 +214,41 @@ def test_valid_round_trip() -> None:
     assert state2.worktree == "/abs/path"
 
 
+def test_contributor_state_round_trip_and_legacy_absence() -> None:
+    legacy = RunState.from_doc(_valid_state_doc())
+    assert legacy.pending_writer_resource_id is None
+    assert legacy.contributor_resource_ids == []
+
+    doc = _valid_state_doc()
+    doc["pending_writer_resource_id"] = "writer-b"
+    doc["contributor_resource_ids"] = ["writer-a", "writer-b"]
+    state = RunState.from_doc(doc)
+    assert state.to_doc()["pending_writer_resource_id"] == "writer-b"
+    assert state.to_doc()["contributor_resource_ids"] == ["writer-a", "writer-b"]
+
+
+@pytest.mark.parametrize(
+    "bad_contributors",
+    ["writer", None, {"writer": True}, ["writer", 1], ["writer", ""]],
+)
+def test_from_doc_rejects_malformed_contributor_set(
+    bad_contributors: Any,
+) -> None:
+    doc = _valid_state_doc()
+    doc["contributor_resource_ids"] = bad_contributors
+
+    with pytest.raises(SpecError, match="contributor_resource_ids"):
+        RunState.from_doc(doc)
+
+
+def test_from_doc_rejects_empty_pending_writer_id() -> None:
+    doc = _valid_state_doc()
+    doc["pending_writer_resource_id"] = ""
+
+    with pytest.raises(SpecError, match="pending_writer_resource_id"):
+        RunState.from_doc(doc)
+
+
 @pytest.mark.parametrize("candidate_key_present", [False, True])
 def test_from_doc_accepts_absent_or_null_candidate_sha(
     candidate_key_present: bool,

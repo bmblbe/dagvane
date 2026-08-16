@@ -89,6 +89,10 @@
   проходити тести, але не пройшов independent exact-SHA review без
   BLOCKER/MAJOR. Candidate SHA **не є** тим самим, що repository HEAD — він
   стає частиною HEAD лише після owner integration.
+- **`PARALLEL-HELD`** — статус ізольованої модульної роботи, яку дозволено
+  виконувати й рецензувати паралельно за замороженим interface contract, але
+  ще заборонено інтегрувати або зараховувати як закриття finding. Held-кандидат
+  чекає acceptance своєї dependency й тільки тоді може стати merge-authorized.
 - **acceptance gate** — точка, де незалежний review і власник підтверджують,
   що конкретний exact SHA задовольняє всі required outcomes стадії. До
   проходження gate — це не готова функціональність, навіть якщо код вже

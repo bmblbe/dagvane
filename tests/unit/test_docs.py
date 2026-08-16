@@ -153,8 +153,25 @@ def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
     assert "R1-A" in todo
     assert "process-record authority" in todo.lower()
     assert "managed Git worktree ownership" in todo
+    assert "PARALLEL-HELD" in todo
+    assert "R1-B1" in todo
+    assert "R1-C0" in todo
     assert "MilHRMS" in todo
     assert "RC1" in todo
+
+
+def test_parallel_module_workflow_preserves_dependency_order() -> None:
+    plan = _read("docs/DEVELOPMENT_PLAN.md")
+    development = _read("DEVELOPMENT.md")
+    glossary = _read("docs/GLOSSARY.md")
+    normalized_plan = re.sub(r"\s+", " ", plan)
+
+    for text in (plan, development, glossary):
+        assert "PARALLEL-HELD" in text
+    assert "merge-authorized" in plan
+    assert "frozen interface" in plan
+    assert "не можна інтегрувати" in normalized_plan
+    assert "accepted SHA" in plan
 
 
 STABLE_DOCS_WITHOUT_VOLATILE_SHAS = (

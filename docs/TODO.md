@@ -12,9 +12,10 @@ test counts — живе тільки тут. Roadmap (незмінна посл
 |---|---|
 | Baseline документаційного reset | `7c9d982caed501605caa72e474651ba907b2bf18` (source SHA, не поточний `main`) |
 | Останній прийнятий product checkpoint | `495b5f1b551642ce3f5bdcbe2853775d00a3fc1d` |
-| Активна стадія | **R1-A — filesystem identity and path safety** (ідентифікатори та безпека шляхів у файловій системі) |
-| Поточна підзадача | **managed Git worktree ownership** (керовані Git worktree з durable доказом власника) — `ACTIVE` |
-| Наступна підзадача | Міграція writer/verify/review worktree на прийнятий manager, потім consolidated R1-A acceptance |
+| Merge-authorized стадія | **R1-A — filesystem identity and path safety** (ідентифікатори та безпека шляхів у файловій системі) |
+| Поточна merge-authorized підзадача | **managed Git worktree ownership** (керовані Git worktree з durable доказом власника) — `ACTIVE` |
+| Паралельні held-підзадачі | **R1-B1** — pure streaming-secret/bounded-capture core; **R1-C0** — pure managed-process port/contract tests. Обидві — `PARALLEL-HELD`, без інтеграції до acceptance залежностей. |
+| Наступна інтеграція | Міграція writer/verify/review worktree на прийнятий manager, потім consolidated R1-A acceptance; лише після цього R1-B1 може перейти з held у merge-authorized integration. |
 | Що безпечно користувачу зараз | Тільки прийнятий Council runtime: `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. Все інше — нижче, "Stop gate". |
 | Stop gate | До R1-H жодна workspace-команда (`chat`, `conversations`, `config`, будь-яка `goal`) не дозволена на реальному або цінному репозиторії. |
 | Останній доказ | Process-record checkpoint `495b5f1…` прийнятий independent exact-SHA review: 762 passed, 1 skipped; Ruff/mypy clean; 0 BLOCKER/MAJOR. |
@@ -63,7 +64,8 @@ SHA в картці не намагається бути самопосилал�
 | Status | Значення |
 |---|---|
 | `OPEN` | Outcome визначений, робота не почата. |
-| `ACTIVE` | Є один поточний bounded writer stage. |
+| `ACTIVE` | Поточна bounded робота в єдиній merge-authorized стадії. |
+| `PARALLEL-HELD` | Ізольований модульний candidate можна розробляти й рецензувати паралельно за frozen interface, але не інтегрувати, не приймати як закриття finding і не використовувати як нову базу до acceptance його залежності. |
 | `PARTIAL` | Частина outcome закрита прийнятими checkpoints, решта в роботі. |
 | `BLOCKED` | Зовнішня залежність або повторюваний impasse не дає прогресу. |
 | `VERIFY` | Candidate існує; потрібні gates/exact-SHA review. |
@@ -86,10 +88,10 @@ Priority означає порядок усередині recovery, а не пр
 | ID | Клас | Priority | Стадія | Статус |
 |---|---|---:|---|---|
 | `SEC-001` | BLOCKER — path escape/destructive cleanup | P0 | R1-A | `PARTIAL/ACTIVE` |
-| `SEC-002` | BLOCKER — durable credential/raw output | P0 | R1-B | `OPEN` |
-| `RES-001` | MAJOR — unbounded shell capture | P1 | R1-B | `OPEN` |
-| `RUN-001` | BLOCKER — spawn/record fencing gap | P0 | R1-C | `OPEN` |
-| `RUN-002` | MAJOR — incomplete process-tree termination | P1 | R1-C | `OPEN` |
+| `SEC-002` | BLOCKER — durable credential/raw output | P0 | R1-B | `OPEN/PARALLEL-HELD` |
+| `RES-001` | MAJOR — unbounded shell capture | P1 | R1-B | `OPEN/PARALLEL-HELD` |
+| `RUN-001` | BLOCKER — spawn/record fencing gap | P0 | R1-C | `OPEN/PARALLEL-HELD` |
+| `RUN-002` | MAJOR — incomplete process-tree termination | P1 | R1-C | `OPEN/PARALLEL-HELD` |
 | `RUN-003` | MAJOR — non-linearizable cancellation | P1 | R1-D | `OPEN` |
 | `EVD-001` | BLOCKER — evidence commands author/forge code | P0 | R1-E | `OPEN` |
 | `EVD-002` | MAJOR — baseline contamination | P1 | R1-E | `OPEN` |

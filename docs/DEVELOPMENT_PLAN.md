@@ -16,8 +16,14 @@
 
 ## Правила виконання плану
 
-1. Одночасно активний один bounded writer stage.
-2. Кожна стадія має clean pinned base SHA, explicit deliverables, tests,
+1. Одночасно **merge-authorized** лише одна dependency-ordered стадія. Водночас
+   незалежні модульні підзадачі наступних стадій можуть виконуватися як
+   `PARALLEL-HELD`: із frozen interface, окремими worktree, непересічними
+   файлами й рівно одним writer на candidate. Такий candidate не можна
+   інтегрувати, приймати як завершення finding або робити новою базою, доки
+   його попередня залежність не пройшла acceptance gate.
+2. Кожна стадія й кожна `PARALLEL-HELD` підзадача має clean pinned base SHA,
+   explicit deliverables, tests,
    non-goals і max scope.
 3. Жоден implementation agent не отримує весь цей план як одну задачу.
 4. Candidate повністю committed; verification і review посилаються на exact
@@ -30,6 +36,10 @@
    реалізацією, не на кілька стадій наперед.
 9. Кожна стадія оновлює [`TODO.md`](TODO.md); статуси й counts не
    дублюються по інших docs.
+10. Конкурентні реалізації одного interface дозволені лише як окремі
+    committed candidates. Незалежні reviewers перевіряють їх у fresh context,
+    judge фіксує disposition, а integrator бере тільки accepted SHA й з'єднує
+    модулі через визначені adapters або малий glue layer.
 
 Стандартний code gate для будь-якої стадії:
 

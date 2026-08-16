@@ -1,339 +1,218 @@
 # Модулі Dagvane
 
-Operational map поточного Python package: реальний code layout, а не бажана
-майбутня структура. Точний exact SHA, конкретні findings і їхній поточний
-статус — виключно у [`TODO.md`](TODO.md), не тут. Терміни — у
-[`GLOSSARY.md`](GLOSSARY.md).
+Це карта фактичного package layout: де шукати code, що він робить і яку
+зрілість має. Поточні candidate SHA та findings не дублюються тут — дивіться
+[`TODO.md`](TODO.md).
 
-Позначки maturity (стабільний словник, не volatile статус):
+## Позначки зрілості
 
-- **accepted** — пройшло independent exact-SHA acceptance у своєму scope;
-- **candidate** — код існує, але load-bearing contract ще не прийнятий;
-  поточну дизпозицію дивись у `TODO.md` — цей документ не стверджує, що
-  candidate прийнятий;
-- **partial** — вузький seam існує, повна capability відсутня;
-- **planned** — product implementation ще немає.
+| Позначка | Значення |
+|---|---|
+| **accepted** | Модуль пройшов independent exact-SHA acceptance у вказаному scope. |
+| **candidate** | Code існує, але load-bearing contract ще не прийнятий. |
+| **partial** | Реалізовано лише вузьку частину майбутньої capability. |
+| **planned** | Product implementation ще немає. |
+
+Acceptance одного port або V1 не робить accepted увесь Workspace runtime.
+
+## Package зверху
+
+```text
+src/dagvane/
+  domain/       core values and rules
+  ports/        interfaces needed by application
+  protocol/     strict boundary documents
+  application/  workflows and policy
+  adapters/     filesystem, provider, process and Git mechanisms
+  workspace/    .dagvane layout, config and lease
+  cli.py        Council CLI and composition root
+  cli_workspace.py  experimental Workspace CLI
+```
 
 ## Domain і ports
 
-### Council domain
+### `domain/models.py` — Council values
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/domain/models.py` |
-| Відповідальність | `TaskSpec`, `Run`, `Plan`, nodes, events, artifacts, budgets, states, domain errors. |
-| Входи/виходи | Immutable/internal values; boundary parsing робить protocol layer. |
-| Effects | Немає filesystem/network/process effects. |
-| Maturity | **accepted G0/G1 scope**. |
-| Основні тести | `test_models.py`, `test_budget.py`, `test_validator.py`, integration budget/failure tests. |
-| Борг | Workspace Goal/Attempt/Approval не інтегровані у цей domain. |
+- **Робить:** `TaskSpec`, `Run`, `Plan`, nodes, events, artifacts, budgets,
+  states та domain errors.
+- **Effects:** немає filesystem, network або subprocess.
+- **Maturity:** **accepted** для G0/G1 Council.
+- **Gap:** Workspace Goal/Attempt/Approval мають окремі types.
 
-### Secret handling
+### `domain/secrets.py` — secret scrubbing
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/domain/secrets.py` |
-| Відповідальність | Ephemeral registry known credential values, variant generation і text scrubbing. |
-| Inputs/outputs | Secret value registration → scrubbed text. |
-| Effects | Registry живе лише в memory. |
-| Maturity | Component реалізований; **candidate** (boundary status — дивись `TODO.md`). |
-| Тести | `test_secrets.py`, backend hardening tests, agent remediation tests. |
-| Defects | Не всі chat/subprocess persistence paths проходять scrubber; raw crash artifact підтверджений SEC-002. |
+- **Робить:** тримає known secret values у memory і замінює їхні текстові
+  variants до output.
+- **Maturity:** accepted у перевіреному Council/backend scope; ширша Workspace
+  persistence boundary — **candidate**.
+- **Важливо:** scrub має відбутися до truncation і durable write.
 
-### Backend port
+### `ports/backend.py` — `ChatBackend`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/ports/backend.py` |
-| Відповідальність | Stateless one-shot `ChatBackend` request/result contract. |
-| Dependencies | Domain values only. |
-| Implementations | Fake, Anthropic, OpenAI-compatible. |
-| Maturity | **accepted G0/G1**. |
-| Не охоплює | Coding-agent cwd, tools, sessions, Git або process lifecycle. |
+- **Робить:** один model request → один normalized result.
+- **Maturity:** **accepted** для Fake, Anthropic та supported
+  OpenAI-compatible text flows.
+- **Не робить:** coding-agent tools, cwd, Git або process lifecycle.
 
-### ExternalAgent port
+### `ports/agent.py` — `ExternalAgent`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/ports/agent.py` |
-| Відповідальність | Request/result для autonomous CLI process із model/reasoning/cwd/timeout. |
-| Implementation | `adapters/agents/subprocess_runner.py`. |
-| Maturity | **candidate**. |
-| Defects | Durable identity/fencing, secret boundary, process-tree cancellation та contributor provenance. |
+- **Робить:** описує request/result автономного CLI process.
+- **Adapter:** `adapters/agents/subprocess_runner.py`.
+- **Maturity:** **candidate**; process, secret і provenance recovery триває.
 
-### Storage ports
+### `ports/storage.py` — Council storage
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/ports/storage.py` |
-| Відповідальність | Council journal, artifact та run-store protocols. |
-| Implementation | `adapters/storage/filesystem.py`. |
-| Maturity | **accepted Council scope**. |
-| Gap | Workspace state не реалізує ці ports і не має того самого replay contract. |
+- **Робить:** journal, artifact та run-store contracts.
+- **Adapter:** `adapters/storage/filesystem.py`.
+- **Maturity:** **accepted** для Council.
+- **Gap:** Workspace files не реалізують той самий replay contract.
 
-### Runtime ports
+### `ports/runtime.py` — deterministic runtime values
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/ports/runtime.py` |
-| Відповідальність | Clock, monotonic clock та ID source для determinism. |
-| Maturity | **accepted G0**. |
-| Тести | Determinism, fixture E2E, budget/latency paths. |
+- **Робить:** clock, monotonic clock та ID source.
+- **Maturity:** **accepted**.
 
-## Protocol і boundary documents
+## Protocol
 
-### Event frames
+### `protocol/documents.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/protocol/frames.py` |
-| Відповідальність | Canonical event NDJSON encoding/decoding і frame-size limit. |
-| Maturity | **accepted Council protocol v1**. |
-| Тести | `test_frames.py`, `test_ndjson.py`, replay/integration tests. |
-| Не є | Command/result/approval IPC для Qt. |
+- **Робить:** strict Task/Fixture JSON parsing, Decision parsing та builders
+  для plan, budget, routes і manifest.
+- **Maturity:** **accepted** для Council.
 
-### Task, fixture, manifest і decision documents
+### `protocol/frames.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/protocol/documents.py` |
-| Відповідальність | Strict Task/Fixture JSON parsing, Decision parsing, plan/routes/budget/manifest document builders. RunReport будує replay application. |
-| Maturity | **accepted G0**. |
-| Тести | `test_validator.py`, `test_decision.py`, E2E/failure tests. |
+- **Робить:** canonical Council event NDJSON encode/decode і frame limit.
+- **Maturity:** **accepted** Council protocol.
+- **Не є:** command/result/approval IPC для Qt.
 
-### Live profiles
+### `protocol/profiles.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/protocol/profiles.py` |
-| Відповідальність | Strict TOML connections, routes, pricing та role bindings. |
-| Effects | Читає й валідовує TOML profile. Значення credential environment variable читає composition root у `cli.py`, не protocol parser. |
-| Maturity | **accepted G1**. |
-| Тести | `test_profiles.py`, `test_cli_profile.py`, `test_live_council.py`. |
-
-Live council profile не слід змішувати з `.dagvane/config.toml`: це різні
-schemas і lifecycle.
+- **Робить:** strict TOML connections, routes, pricing і Council role
+  bindings.
+- **Maturity:** **accepted** для live Council.
+- **Secret rule:** parser бачить назву environment variable, не credential
+  value.
 
 ## Council application
 
-### Council orchestration
+### `application/council.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/council.py` |
-| Відповідальність | Fixed template, plan validation, budget ledger, node execution, provider dispatch та run finalization. |
-| Inputs | `LoadedTask`, `FixtureSpec` або `ProfileSpec`, resolved backend ports, stores, clock/IDs. |
-| Outputs | Canonical events/artifacts і `CouncilRunResult` зі status/report; internal immutable `Run` не є CLI result. |
-| Maturity | **accepted G0/G1**. |
-| Тести | E2E, determinism, budgets, failures, live council, backend isolation. |
-| Борг | Великий coherent module; generic workflow/DAG runtime ще відсутній. |
+- **Робить:** fixed `council-v1` plan, validation, budgets, node execution,
+  provider dispatch і run finalization.
+- **Вихід:** canonical events/artifacts та report result.
+- **Maturity:** **accepted** для deterministic і live Council.
+- **Gap:** це не general workflow engine.
 
-### Replay
+### `application/replay.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/replay.py` |
-| Відповідальність | Causal validation events, state/budget reconstruction і derived views. |
-| Maturity | **accepted Council scope**. |
-| Тести | `test_replay.py`, `test_replay_validator.py`, storage/failure tests. |
-| Gap | Не продовжує execution і не читає Workspace Goal state. |
+- **Робить:** перевіряє causal event history, відновлює state/budgets і
+  будує derived views.
+- **Maturity:** **accepted** для Council.
+- **Не робить:** execution resume або Workspace Goal replay.
 
-## Adapters
+## Provider і storage adapters
 
-### Fake backend
+### `adapters/backends/fake.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/adapters/backends/fake.py` |
-| Відповідальність | Deterministic model responses з fixture. |
-| Effects | Немає network. |
-| Maturity | **accepted G0**, default test backend. |
+Deterministic offline responses з fixture. **Accepted** і використовується
+default tests.
 
-### Anthropic backend
+### `adapters/backends/anthropic.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/adapters/backends/anthropic.py` |
-| Відповідальність | Native Anthropic request, response, usage та normalized failures. |
-| Dependencies | Optional `anthropic`, imported lazy. |
-| Maturity | **accepted G1**. |
+Native Anthropic request, response, usage та error normalization. Optional SDK
+імпортується ліниво. **Accepted** у G1 scope.
 
-### OpenAI-compatible backend
+### `adapters/backends/openai_compat.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/adapters/backends/openai_compat.py` |
-| Відповідальність | Generic OpenAI-compatible HTTP transport. |
-| Dependencies | Optional `httpx`, imported lazy. |
-| Maturity | **accepted G1 contract** для supported text-only semantics. |
-| Межа | Сумісність конкретного provider доводиться conformance/live evidence; назва API сама по собі не гарантує semantics. |
+Generic HTTP transport для provider, чия text-only wire behavior справді
+сумісна. Optional `httpx` імпортується ліниво. **Accepted** у перевіреному G1
+contract; сумісність нового provider потребує conformance evidence.
 
-Shared normalization/redaction helpers розташовані в
-`adapters/backends/common.py`. Детальний accepted contract:
+Shared normalization і redaction helpers лежать у
+`adapters/backends/common.py`. Детальний contract:
 [`architecture/modules/backends/ARCHITECTURE.md`](architecture/modules/backends/ARCHITECTURE.md).
 
-### Council filesystem storage
+### `adapters/storage/filesystem.py`
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/adapters/storage/filesystem.py` |
-| Відповідальність | Run layout, gapless journal append, content-addressed artifacts, manifests і derived views. |
-| Effects | Filesystem writes з fsync/atomic ordering. |
-| Maturity | **accepted G0/G1**. |
-| Тести | `test_storage.py`, replay/determinism/failure integration tests. |
+Зберігає Council manifests, gapless journal, content-addressed artifacts і
+derived views із fsync/atomic ordering. **Accepted** для Council.
 
-## Workspace application
+## Workspace application — усе candidate
 
-Усі модулі цього розділу — Autonomous Developer candidate. Наявність API або
-passing happy-path test не означає acceptance.
+Наявність API або passing happy path нижче не означає product acceptance.
 
-### Conversations і chat
+| Модуль | Що робить | Maturity / головна межа |
+|---|---|---|
+| `application/chat.py` | Conversations, messages, prompt window, ExternalAgent call. | **candidate**; identifier, context і secret boundaries проходять recovery. |
+| `application/goals.py` | Goal contract, freeze/hash, status і serialization. | **candidate**; filesystem identity та cross-file state ще не accepted. |
+| `application/prepare.py` | Draft Goal із conversation; baseline після approval. | **candidate**; evidence isolation ще не product-accepted. |
+| `application/resources.py` | Configured resources і deterministic attempt/tier selection. | **partial candidate**; capabilities, concurrency і escalation не завершені. |
+| `application/localmodel.py` | Ollama availability probe та summarization seam. | **partial**; summarizer не підключений, application створює concrete adapter. |
+| `application/autodev.py` | Implement → commit → verify → review → remediate loop. | **candidate**; інтегрована recovery acceptance відсутня. |
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/chat.py` |
-| Відповідальність | File-backed conversation manifest/messages, current pointer, history-window prompt assembly. |
-| Effects | `.dagvane/conversations`, ExternalAgent invocation. |
-| Maturity | **candidate**. |
-| Тести | `test_autodev_mvp.py`, remediation integration tests. |
-| Defects | Unvalidated conversation IDs; initial message/title can persist selected-resource secret; full ContextSnapshot absent. |
+Повні active findings і їхній lane mapping — у [`TODO.md`](TODO.md).
 
-### Goal contracts/store
+## Workspace mechanisms — усе candidate
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/goals.py` |
-| Відповідальність | Goal contract, hash/freeze, status, record serialization. |
-| Effects | `.dagvane/goals/<name>/goal.json`. |
-| Maturity | **candidate**. |
-| Defects | Goal ID/path containment; cross-file state transitions; amendment path not integrated end-to-end. |
+### `workspace/paths.py`
 
-### Goal preparation
+Описує `.dagvane/` layout, atomic single-file replace і JSONL helpers. Callers
+ще не мають одного accepted canonical-ID/ownership boundary; кілька files не
+є transaction.
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/prepare.py` |
-| Відповідальність | Derive draft contract from conversation; collect baseline after approval. |
-| Effects | Model/agent call, Git worktree, owner-approved shell commands. |
-| Maturity | Draft-only change implemented, **candidate**. |
-| Defects | Baseline commands share mutable checkout and can contaminate later evidence. |
+### `workspace/config.py`
 
-### Resource catalog/router
+Читає defaults і `.dagvane/config.toml`, підтримує get/set/edit. Default
+resources можуть посилатися на real coding runtimes, тому tests мають явно
+замінювати їх fakes.
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/resources.py` |
-| Відповідальність | Parse configured resources і deterministic tier/attempt selection. |
-| Inputs | Effective resource config; `route_task(task_kind, risk, attempt, preferred_resource)` і LOCAL availability flag. Current `ResourceSpec` не моделює capabilities/exclusions. |
-| Maturity | **partial candidate**. |
-| Defects | Progress/escalation resets incorrectly; configured concurrency is unused; availability/reliability/cost evidence incomplete. |
+### `workspace/lease.py`
 
-### Local model helper
+POSIX `flock` не дає двом Goal runners зайти одночасно в normal path. Це
+candidate coordination mechanism, не process sandbox і не доказ відсутності
+orphan child. NFS не є надійною lock boundary.
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/localmodel.py` |
-| Відповідальність | Ollama availability probe і lightweight summarization seam. |
-| Maturity | **partial**: probe connected, summarizer unused. |
-| Debt | Application directly constructs concrete backend. |
+### `adapters/agents/subprocess_runner.py`
 
-### Autonomous state machine
+Запускає coding CLI, керує process group та agent-run artifacts. Зовнішній
+managed-process port перевіряється окремо, але цей adapter і весь Workspace
+flow залишаються **candidate** до integrated recovery.
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/application/autodev.py` |
-| Відповідальність | Baseline/evaluate → route → implement → commit → verify → review → remediate → terminal outcome. |
-| State | `goal.json`, `run-state.json`, `log.jsonl`, worktree/lease/process metadata. |
-| Maturity | **candidate** (findings — дивись `TODO.md`). |
-| Тести | `test_autodev_mvp.py`, `test_autodev_remediation.py`. |
-| Defects | Evidence mutation, cancellation races, contributor identity, reviewer isolation/schema, escalation; див. `TODO.md`. |
+### `adapters/localexec.py`
 
-## Workspace/adapters
-
-### Workspace paths і atomic helpers
-
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/workspace/paths.py` |
-| Відповідальність | `.dagvane/` layout, atomic bytes/JSON replace, JSONL append/read. |
-| Maturity | **candidate**. |
-| Defects | Callers передають unvalidated identifiers; multiple files не утворюють transaction; JSONL reader contract слабший за Council replay. |
-
-### Workspace config
-
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/workspace/config.py` |
-| Відповідальність | Engine defaults + deep TOML workspace overrides, get/set/edit. |
-| Maturity | Functional candidate. |
-| Effects | `.dagvane/config.toml`. |
-| Ризик | Defaults вмикають real Codex resources; test fixture мусить вимкнути їх explicitly. |
-
-### Goal lease
-
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/workspace/lease.py` |
-| Відповідальність | POSIX non-blocking `flock` навколо Goal runner. |
-| Maturity | Normal-path exclusion реалізовано; **candidate** (fencing status — дивись `TODO.md`). |
-| Межі | POSIX-only; NFS ненадійний; lease release не доводить відсутність orphan process. |
-
-### ExternalAgent subprocess runner
-
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/adapters/agents/subprocess_runner.py` |
-| Відповідальність | Запуск Codex/`agy`/test command, prompt/output artifacts, timeout/process identity. |
-| Effects | Process group, minimal environment, `.dagvane/agent-runs`. |
-| Maturity | **candidate**. |
-| Defects | Raw output survives parent crash; spawn/record/pump failure leaves writer; recorded PGID lifecycle incomplete. |
-
-### Local execution
-
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/adapters/localexec.py` |
-| Відповідальність | Shell commands, process termination, Git inspection/commit/worktree lifecycle. |
-| Effects | Host shell, Git, filesystem, process groups. |
-| Maturity | **candidate**. |
-| Defects | Destructive path not centrally contained; output capture unbounded; process-tree kill incomplete. |
+Виконує local commands і Git/worktree operations. Це effect-heavy
+**candidate**; callers мають працювати через accepted typed ownership,
+bounded capture та managed process contracts.
 
 ## Interfaces
 
 ### CLI
 
-| Поле | Значення |
-|---|---|
-| Код | `src/dagvane/cli.py`, `src/dagvane/cli_workspace.py` |
-| Відповідальність | Parser, composition root, exit/error mapping, stdout/stderr contract. |
-| Maturity | Council commands accepted; workspace commands candidate. |
-| Entry points | `dagvane`, `python -m dagvane`. |
-| Тести | CLI, installed entrypoint, profile, NDJSON та Autodev integration tests. |
+- **Files:** `cli.py`, `cli_workspace.py`, `__main__.py`.
+- **Entrypoints:** `dagvane` і `python -m dagvane`.
+- **Accepted:** Council plan/run/show/events commands.
+- **Candidate:** chat, conversations, config і Goal commands.
+- **Contract:** stdout для result, stderr для diagnostics/progress.
 
-Фактична command surface наведена в root [`README.md`](../README.md).
-`runs list`, generic DAG CLI, daemon/REPL і `serve --stdio` відсутні.
+Фактичний синтаксис і stop gate — у root [`README.md`](../README.md).
 
 ### GUI
 
-| Поле | Значення |
-|---|---|
-| Код | `gui/README.md` placeholder. |
-| Maturity | **planned G5**, C++/Qt коду немає. |
-| Dependency | Спочатку stable command/result IPC і harness. |
+- **Code:** лише [`gui/README.md`](../gui/README.md); Qt implementation немає.
+- **Maturity:** **planned** G5.
+- **Dependency:** спочатку stable versioned engine IPC, потім C++20/Qt 6 thin
+  client.
 
-## Cross-module debt і незавершені seams
+## Відомі cross-module gaps
 
-1. Council та Workspace мають два різні durable runtimes.
-2. Application імпортує concrete effect adapters.
-3. `council.py` та `autodev.py` концентрують забагато policy/coordination.
-4. Typed `ContextSnapshot` і canonical reconstruct відсутні.
-5. `session_ref` persistиться, але не використовується для resume.
-6. `router.concurrency` не керує runtime concurrency.
-7. Local summarizer не підключений до context selection.
-8. `record_amendment_required()` не завершений як Goal/CLI flow.
-9. Reviewer `write_access=False` є metadata, а не enforced containment.
-10. Event frames не є stable GUI IPC.
+1. Council і Workspace мають різні durable state models.
+2. Деякий Workspace application code напряму імпортує effect adapters.
+3. Typed `ContextSnapshot` і canonical reconstruct ще не завершені.
+4. Configured concurrency не керує runtime concurrency.
+5. Local summarizer не підключений до context selection.
+6. Reviewer `write_access=False` metadata саме по собі не дає containment.
+7. Council event frames не є stable GUI IPC.
 
-Пріоритет і acceptance кожного активного defect задає
-[`TODO.md`](TODO.md); порядок великих capability increments —
-[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
+Порядок усунення gaps задає [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), а
+активну lane та exact evidence — [`TODO.md`](TODO.md).

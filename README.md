@@ -1,58 +1,36 @@
 # Dagvane
 
-## Що це і навіщо
+Dagvane — локальний Python-рушій для інженерних задач, у яких кілька
+AI-моделей пропонують рішення, перевіряють одна одну й залишають відтворювані
+докази. Рушій зберігає події та артефакти, контролює бюджет і передає людині
+точний Git-коміт для рішення. Він не робить push або merge самостійно.
 
-Dagvane — локальний headless-рушій, який керує розробкою програм за участю
-кількох AI-моделей і coding agents, замість того щоб бути ще одним чат-вікном.
-Він сам зберігає свій стан, будує відтворювані плани, обмежує бюджет і ефекти
-дій, збирає докази того, що саме сталося, і передає людині точний Git SHA для
-остаточного рішення. Людина завжди залишається тим, хто вирішує, що
-інтегрувати — Dagvane не робить push і не робить merge сам.
+Проєкт ще розробляється. Поточний статус, активні дефекти й точні Git SHA
+ведуться тільки в [`docs/TODO.md`](docs/TODO.md).
 
-**Основна ідея:** замість одного великого запиту до однієї моделі — кілька
-незалежних "пропозицій", сліпе взаємне рецензування і суддя, які разом дають
-відтворюваний, перевірюваний результат замість непрозорого single-shot
-виводу.
+## Що готове, а що ні
 
-Проєкт пишеться на Python 3.11+. Майбутній desktop-клієнт буде реалізований
-на C++20/Qt 6 як тонкий клієнт цього ж Python-рушія (дивись
-["GUI зараз і в планах"](#gui-зараз-і-в-планах) нижче).
+| Частина | Стан |
+|---|---|
+| Council: детермінований запуск із fixture | Прийнято й перевірено. |
+| Council: живі Anthropic та OpenAI-compatible провайдери | Прийнято; потребує opt-in конфігурації й credentials. |
+| Перегляд збережених Council runs та events | Прийнято. |
+| Workspace chat, conversations, config і Goal runner | Є в коді, але не прийнято: триває security/durability recovery. |
+| Desktop GUI на C++20/Qt 6 | Заплановано; Qt-коду ще немає. |
 
-## Що безпечно використовувати зараз
+> **Stop gate.** До інтегрованого прийняття R1-H **жодна workspace-команда**
+> не дозволена на реальному або цінному репозиторії. Це стосується `chat`,
+> `config`, `goal prepare`, `goal approve`, `goal run` та
+> `conversations show/use`, а не лише виконання Goal. Досліджуйте цю поверхню
+> тільки в одноразовому синтетичному репозиторії без secrets і цінних даних.
 
-Єдина прийнята й перевірена частина — **Council runtime**: детермінований і
-живий (multi-provider) розгляд задачі кількома моделями з durable записом
-кожного кроку. Це і є "безпечно" сьогодні.
+## Вимоги та встановлення
 
-Усе інше (`chat`, `conversations`, `config`, будь-яка `goal`) — існуючий у
-коді, але **не прийнятий** кандидат: докладніше в розділі
-["Прийнятий CLI проти заблокованого"](#прийнятий-cli-проти-заблокованого)
-і в [`docs/TODO.md`](docs/TODO.md), де ведеться актуальний перелік дефектів
-і exact-SHA статус.
-
-> **Stop gate.** До окремого R1 acceptance (поточний прогрес — тільки в
-> [`docs/TODO.md`](docs/TODO.md)) **жодна workspace-команда** не є дозволеним
-> шляхом для реального або цінного репозиторію. Дефекти стосуються не лише
-> `goal run`, а й `goal prepare`, `goal approve`, `conversations show/use` та
-> інших команд. Досліджувати їх можна тільки в одноразовому синтетичному
-> репозиторії без secrets і без цінних даних.
-
-## Вимоги
-
-- Python **3.11 або новіший**;
-- Git — для розробки самого репозиторію та для експериментального workspace
-  runtime;
-- POSIX-система з `flock` для поточного Goal runner; не-POSIX платформа
-  явно відмовляє, а NFS не вважається надійною межею lease;
-- default install не має runtime Python-залежностей;
-- опційний extra `live` додає `anthropic` і `httpx` для живих провайдерів;
-- C++20, CMake і Qt 6 знадобляться лише після реалізації GUI-стадії плану
-  (дивись [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md)) — сьогодні
-  вони не потрібні.
-
-## Встановлення
-
-Рекомендований development setup через `uv`:
+- Python 3.11 або новіший;
+- `uv` для рекомендованого development setup;
+- Git;
+- default install не має сторонніх runtime-залежностей;
+- optional extra `live` додає SDK для живих провайдерів.
 
 ```bash
 git clone <repository-url> dagvane
@@ -61,13 +39,13 @@ uv sync --python 3.11 --extra dev --locked
 uv run dagvane --version
 ```
 
-Для живих provider adapters:
+Для живого Council:
 
 ```bash
 uv sync --python 3.11 --extra dev --extra live --locked
 ```
 
-Альтернатива зі стандартним `venv`:
+Без `uv`:
 
 ```bash
 python3.11 -m venv .venv
@@ -76,55 +54,53 @@ python -m pip install -e ".[dev]"
 dagvane --version
 ```
 
-`python -m dagvane` еквівалентний console script `dagvane`.
+`python -m dagvane` і console script `dagvane` викликають той самий CLI
+(command-line interface — інтерфейс командного рядка).
 
-## Детермінований offline quick start
+## Швидкий offline-запуск
 
-Fixtures у `tests/fixtures/` — водночас і виконувані приклади. Команди нижче
-не звертаються до мережі й не запускають жодного зовнішнього coding agent —
-повністю безпечно спробувати одразу після встановлення.
+Цей приклад не звертається до мережі й не запускає coding agent:
 
 ```bash
-# Побудувати й перевірити план, нічого не виконуючи
+# Лише побудувати та перевірити план
 uv run dagvane plan council tests/fixtures/task_basic.json \
   --dry-run --output json
 
-# Виконати повний детермінований council через FakeBackend
+# Виконати Council через детермінований FakeBackend
 uv run dagvane council tests/fixtures/task_basic.json \
   --fixture tests/fixtures/fixture_happy.json \
   --output text
 
-# Fixture фіксує run id наперед
+# fixture_happy.json задає run id r-happy-0001
 uv run dagvane runs show r-happy-0001 --output json
 uv run dagvane events r-happy-0001 --since 0 --output ndjson
 ```
 
-`--output ndjson` у `council` пише canonical event frames у stdout;
-діагностика йде в stderr. Повторний запуск того самого pinned fixture в тому
-самому state root може конфліктувати з уже наявним `run_id` — для чистого
-повторення використовуйте чистий checkout або видаліть лише вами створений
-test state.
+Повторний запуск fixture з тим самим `run_id` у тому самому state root
+правильно відмовить, щоб не перезаписати попередній run. Для чистого
+повторення використайте новий checkout або видаліть лише створений вами
+test run.
 
-### Каталог fixtures
+Доступні fixtures:
 
-| Fixture | Призначення |
+| Файл | Що демонструє |
 |---|---|
-| `tests/fixtures/task_basic.json` | Невеликий валідний TaskSpec. |
-| `tests/fixtures/task_low_budget.json` | Демонструє відмову через budget admission. |
-| `tests/fixtures/fixture_happy.json` | Повний успішний council із валідним рішенням judge. |
-| `tests/fixtures/fixture_bad_decision.json` | Judge порушує document contract; run завершується fail-closed. |
-| `tests/fixtures/fixture_missing_model.json` | Відсутня відповідь одного worker; degraded council заборонений. |
+| `tests/fixtures/task_basic.json` | Валідна невелика задача. |
+| `tests/fixtures/task_low_budget.json` | Відмова до model call через малий бюджет. |
+| `tests/fixtures/fixture_happy.json` | Успішний повний Council. |
+| `tests/fixtures/fixture_bad_decision.json` | Невалідна відповідь judge; fail-closed завершення. |
+| `tests/fixtures/fixture_missing_model.json` | Відсутня відповідь worker; degraded run заборонено. |
 
-## Живий Council (реальні провайдери)
+## Живий Council
 
-Live profile — окремий strict TOML-документ із трьома різними сутностями:
+Live profile — строгий TOML-файл із трьома частинами:
 
-- `connections`: transport/backend і назва environment variable для secret;
-- `routes`: model, token limit та зафіксований pricing snapshot;
-- `council`: прив'язка routes до п'яти фіксованих ролей.
+- `connections`: transport і назва environment variable з credential;
+- `routes`: model, ліміти та зафіксована ціна;
+- `council`: прив'язка routes до п'яти ролей.
 
-Значення credential ніколи не записується у profile: там зберігається лише
-назва environment variable.
+Credential value не записується в profile; там є лише назва environment
+variable.
 
 ```bash
 export ANTHROPIC_API_KEY='...'
@@ -133,28 +109,29 @@ uv run dagvane council path/to/task.json \
   --output text
 ```
 
-`--fixture` і `--profile` взаємно виключні. Default test suite завжди
-offline; live smoke tests запускаються лише явно, як описано в
-[`DEVELOPMENT.md`](DEVELOPMENT.md#live-tests).
+`--fixture` і `--profile` взаємовиключні. Звичайний test suite завжди offline;
+opt-in live tests описані в [`DEVELOPMENT.md`](DEVELOPMENT.md#live-tests).
 
-Прийнятий детальний контракт: [`docs/architecture/modules/backends/ARCHITECTURE.md`](docs/architecture/modules/backends/ARCHITECTURE.md).
+## CLI: прийняті команди
 
-## Прийнятий CLI проти заблокованого
-
-### Прийнято зараз (безпечно на реальному репозиторії)
+Ця поверхня пройшла acceptance у своєму Council scope:
 
 ```text
 dagvane plan council TASK --dry-run --output json
-dagvane council TASK (--fixture FIXTURE | --profile PROFILE)
-dagvane runs show RUN_ID
-dagvane events RUN_ID --since N --output ndjson
+dagvane council TASK (--fixture FIXTURE | --profile PROFILE) [--output text|json|ndjson]
+dagvane runs show RUN_ID --output json
+dagvane events RUN_ID [--since N] --output ndjson
 ```
 
-Ці чотири команди належать до прийнятого Council runtime: вони не пишуть
-файли поза `.dagvane/runs/`, не викликають зовнішній coding agent і не
-роблять Git-мутацій.
+`council` зберігає durable state під `.dagvane/runs/`. Council-команди не
+створюють Git commits, не змінюють checkout і не запускають автономний coding
+agent. Live profile, звісно, робить явно запитані мережеві виклики до
+налаштованих провайдерів.
 
-### Існує в коді, але заблоковано/кандидат для цінних репозиторіїв
+## CLI: експериментальні workspace-команди
+
+Наступні команди parser показує в `--help`, але вони ще не є безпечною
+product-поверхнею:
 
 ```text
 dagvane chat MESSAGE [--new] [--conversation ID] [--resource ID]
@@ -163,115 +140,69 @@ dagvane config list|get|set|edit
 dagvane goal prepare|show|approve|run|resume|cancel|list
 ```
 
-Ці команди технічно працюють, але їхні durability і security contracts ще
-**не прийняті** (дивись stop gate вище і повний перелік дефектів у
-[`docs/TODO.md`](docs/TODO.md)). Можливі ефекти, про які варто знати, перш
-ніж навіть пробувати їх на чомусь цінному:
+Вони можуть писати `.dagvane/`, створювати Git worktrees, запускати shell або
+зовнішні agent-процеси й робити candidate commits. Наявність happy-path тестів
+не означає acceptance. Конкретні unresolved findings і remediation status —
+у [`docs/TODO.md`](docs/TODO.md).
 
-- `chat` — default workspace config вмикає реальні Codex resources, тому
-  навіть на вигляд невинне повідомлення може запустити зовнішній CLI-процес
-  і створити стан у `.dagvane/`;
-- `conversations` — читає/пише файли розмови; `show`/`use` також зачіпає
-  path-контейнмент, який ще не прийнятий;
-- `config` — змінює `.dagvane/config.toml`, включно з тим, які ресурси
-  вважаються дозволеними;
-- будь-яка `goal` — може створити Git worktree, виконати shell-команди,
-  запустити зовнішнього agent і зробити commit у candidate worktree.
+Не передавайте цим командам secrets або production data. `.dagvane/`
+ігнорується Git, але не є secret store чи security boundary.
 
-Не передавайте цим командам secrets або production data. Не використовуйте
-їх на репозиторії, втрату якого ви не можете собі дозволити.
+## Worktree не є sandbox
 
-### Заплановано, синтаксис ще не існує
+Git worktree — окремий checkout того самого репозиторію. Він допомагає не
+змішувати зміни, але не обмежує процеси, мережу, домашній каталог чи інші
+файли користувача. Для такого обмеження потрібен окремий sandbox, якого
+поточний Workspace runner ще не має.
 
-Нижче — напрямок, а не команди, які можна набрати сьогодні: безпечний Goal
-workflow після R1/G2/G3, інспекція context/session, ToolBroker permissions,
-загальні validated workflows, стабільний GUI IPC. `runs list`, будь-який
-daemon/REPL режим, generic DAG CLI і `serve --stdio` **не є** сьогоднішніми
-командами — не покладайтесь на такий синтаксис.
-
-## Durable стан
-
-Council run використовує event-sourced layout:
+## Збережений Council state
 
 ```text
 .dagvane/runs/<run-id>/
   manifest.json
   events.jsonl
   artifacts/<sha256>
-  decision.json    # тільки коли є валідне terminal рішення judge
+  decision.json
   report.json
 ```
 
-Workspace-кандидат використовує інший, ще не прийнятий persistence contract:
+`events.jsonl` і content-addressed artifacts є канонічним записом. Report і
+decision — похідні файли. Workspace candidate має інший persistence contract;
+не переносіть гарантії Council на workspace/Goal runtime.
 
-```text
-.dagvane/
-  config.toml
-  conversations/<id>/
-  goals/<name>/
-  agent-runs/<execution-id>/
-  worktrees/
-```
+## Exit codes Council CLI
 
-Ці два сховища не мають однакових crash/replay гарантій — це різні
-підсистеми з різною зрілістю, не одна durable модель. `.dagvane/`
-Git-ignored, але це **не** security boundary і не secret store: не
-покладайтеся на нього як на сховище credentials.
-
-## Чесне попередження: worktree — не sandbox
-
-Git worktree дає ізоляцію checkout (окрема робоча копія файлів), але **не**
-дає host-level containment. Модель або coding agent, що працює у worktree,
-досі має доступ до тих самих процесів, мережі й файлової системи, що й будь-яка
-інша програма поточного користувача, якщо явно не увімкнено окремий sandbox
-mechanism (заплановано, дивись [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md),
-стадія 4). Не сприймайте наявність окремого worktree як доказ безпеки
-виконання згенерованого коду.
-
-## GUI зараз і в планах
-
-Сьогодні GUI-коду немає — у `gui/` лише опис плану, дивись
-[`gui/README.md`](gui/README.md). Desktop-клієнт з'явиться на C++20/Qt 6 як
-тонкий клієнт лише після того, як буде реалізований і заморожений стабільний
-versioned command/result IPC поверх Python engine — нинішній event NDJSON
-для цього не призначений.
-
-## Exit codes
-
-Прийнята Council CLI-поверхня використовує:
-
-| Code | Значення |
+| Код | Значення |
 |---:|---|
 | `0` | Команда або run успішно завершені. |
-| `2` | Невалідний input/usage. |
-| `10` | Run коректно завершився зі статусом failed. |
-| `40` | Internal/storage failure; terminal state не вигадується. |
+| `2` | Помилка аргументів або input document. |
+| `10` | Run валідно завершився зі статусом failed. |
+| `40` | Internal або storage failure. |
 
-Workspace-кандидат повертає частину цих кодів, але його lifecycle semantics
-ще не прийняті — не покладайтесь на них як на stable automation contract.
+Workspace exit semantics ще не є stable automation contract.
 
-## Документація
+## GUI
 
-- [`DEVELOPMENT.md`](DEVELOPMENT.md) — довідник розробника: середовище,
-  архітектурні межі, gates, exact-SHA workflow.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — фактична та цільова
-  архітектура, межі й invariants.
-- [`docs/MODULES.md`](docs/MODULES.md) — карта реалізованих модулів і їхньої
-  зрілості.
-- [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) — дев'ять стадій до
-  повного local release.
-- [`docs/TODO.md`](docs/TODO.md) — єдине джерело поточного статусу, exact SHA
-  і активних дефектів.
-- [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — пояснення всіх скорочень і
-  спеціальних термінів простою мовою.
-- [`docs/architecture/decisions/`](docs/architecture/decisions/) — прийняті
-  ADR та owner amendments.
-- [`docs/architecture/history/`](docs/architecture/history/) — незмінні
-  історичні матеріали, не поточна інструкція.
+GUI (graphical user interface — графічний інтерфейс) запланований як тонкий
+клієнт на C++20/Qt 6. Сьогодні в `gui/` немає Qt implementation. Спочатку
+Python engine має отримати стабільний versioned IPC (inter-process
+communication — протокол між процесами), потім Qt client працюватиме поверх
+нього. Поточний Council event NDJSON не є готовим GUI IPC.
 
-## Ліцензія
+Дивіться [`gui/README.md`](gui/README.md) і послідовність у
+[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md).
 
-У репозиторії є файл `LICENSE`, але license metadata пакета навмисно не
-опублікована: остаточне узгоджене owner рішення ще відкрите (дивись `OWN-001`
-у [`docs/TODO.md`](docs/TODO.md)). Не робіть припущень про ліцензію лише з
-наявності одного файла.
+## Куди далі
+
+- [`docs/TODO.md`](docs/TODO.md) — єдиний live dashboard: current stage,
+  candidates, findings і точні SHA.
+- [`DEVELOPMENT.md`](DEVELOPMENT.md) — setup, repo map, gates і workflow.
+- [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) — лінійна дорога до
+  RC1 та MilHRMS.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — межі системи.
+- [`docs/MODULES.md`](docs/MODULES.md) — що робить кожен модуль і наскільки
+  він зрілий.
+- [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — терміни простою мовою.
+
+У репозиторії є `LICENSE`, але package license metadata очікує окремого
+рішення власника. Не робіть висновок про умови лише з назви файла.

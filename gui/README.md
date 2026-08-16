@@ -1,50 +1,42 @@
-# GUI Dagvane (заплановано, не існує)
+# GUI Dagvane — заплановано
 
-Сьогодні в `gui/` немає жодного рядка Qt-коду — цей файл лише описує
-напрямок. Не очікуйте build-скриптів, CMake-проєкту чи бінарників у цій
-директорії зараз.
+У `gui/` ще немає C++ або Qt implementation. Тут немає CMake project,
+build command чи desktop binary.
 
-## Що заплановано
+## Що буде в G5
 
-Нативний desktop-клієнт на **C++20/Qt 6**, тонкий клієнт над Python-рушієм:
+Dagvane GUI планується як thin client на C++20/Qt 6:
 
-- уся provider/orchestration/tool/Git/Goal-логіка залишається в headless
-  Python engine;
-- у C++ дозволені лише protocol client, локальні view models, presentation і
-  desktop-інтеграція;
-- GUI спілкується з engine через окремий процес (`QProcess`), а не імпортує
-  Python код напряму.
+- Python engine зберігає provider, workflow, tool, Git і Goal logic;
+- C++ client містить protocol client, view models і presentation;
+- GUI запускає engine окремим `QProcess`, а не імпортує Python code;
+- owner approvals та Git integration лишаються явними діями.
 
-## Чому коду ще немає
+G5 має дві послідовні частини:
 
-Перед GUI потрібен стабільний **versioned command/result IPC** (inter-process
-communication — обмін повідомленнями між GUI-процесом і Python
-engine-процесом; дивись [`../docs/GLOSSARY.md`](../docs/GLOSSARY.md)) поверх
-Python engine. Наявний зараз event NDJSON-стрім Council — це журнал подій
-run, **не** command/result протокол для GUI: він не має запит/відповідь
-кореляції, версійного handshake чи approval frames, потрібних інтерактивному
-клієнту.
+1. стабільний versioned command/result IPC між процесами;
+2. Qt client поверх замороженого IPC contract.
 
-Порядок стадій до GUI — у
-[`../docs/DEVELOPMENT_PLAN.md`](../docs/DEVELOPMENT_PLAN.md): спочатку
-стабільний IPC (окрема стадія), потім Qt-клієнт як тонкий клієнт над ним.
-Архітектурні межі й maturity — у
-[`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) і
-[`../docs/MODULES.md`](../docs/MODULES.md). Поточний статус і exact SHA —
-виключно у [`../docs/TODO.md`](../docs/TODO.md).
+Поточний Council NDJSON — stream journal events, а не GUI IPC: у ньому немає
+повного request/result, handshake, approval, backpressure й lifecycle
+contract.
 
-## Заплановані user-surfaces (не сьогоднішні)
+## Запланована поверхня
 
-Коли IPC і Qt-фундамент будуть готові, повна поверхня GUI має покривати:
-project/workspace, conversations і Goal contract lifecycle, agents/roles/
-council, run monitor з подіями й помилками, providers/models/routes,
-context/memory/provenance inspector, artifacts, tool permission approvals,
-Git candidate/review/integration gate, budgets/costs, settings/diagnostics.
-Це опис напрямку, не обіцянка конкретної дати.
+Після готового IPC GUI має показувати projects, conversations, Goals,
+Councils, run progress, errors, artifacts, context/provenance, providers,
+routes, budgets, tool approvals і Git candidate/review/integration gate.
 
-## Build/run команди — майбутні, не поточні
+Це scope майбутньої фази, не готова feature і не обіцянка дати. Повний
+Release Candidate 1 (RC1) проходить acceptance лише після Qt, перед MilHRMS.
 
-Команди на кшталт `cmake`, `ninja`, `ctest` для цього каталогу з'являться
-лише після реалізації Qt-фундаменту. Спробувати їх сьогодні нема сенсу —
-проєкту ще не існує. Використовуйте Python CLI (дивись кореневий
-[`../README.md`](../README.md)) як єдиний робочий інтерфейс зараз.
+## Що запускати зараз
+
+Qt-команд ще немає. Використовуйте реалізований Python CLI, дотримуючись
+поділу accepted Council / experimental Workspace у
+[`../README.md`](../README.md).
+
+- Roadmap: [`../docs/DEVELOPMENT_PLAN.md`](../docs/DEVELOPMENT_PLAN.md)
+- Architecture boundary: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md)
+- Module maturity: [`../docs/MODULES.md`](../docs/MODULES.md)
+- Current status: [`../docs/TODO.md`](../docs/TODO.md)

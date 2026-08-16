@@ -1,55 +1,46 @@
 # План розробки Dagvane
 
-Це канонічна послідовність стадій до повного local release (RC1). Вона
-відповідає на питання «що йде далі і що об'єктивно означає завершення
-стадії?» — без дат, без volatile SHA і без test counts: усе це живе тільки в
-[`TODO.md`](TODO.md). Терміни пояснені в [`GLOSSARY.md`](GLOSSARY.md).
+Це одна лінійна карта до першого повного локального релізу. Тут немає дат,
+candidate SHA або test counts. Поточний status і докази живуть тільки в
+[`TODO.md`](TODO.md).
 
-## Owner decision про пріоритет
+Owner decision збережено без змін: повний Release Candidate 1 (RC1) включає
+CLI, Python engine, stable IPC і нативний C++20/Qt 6 GUI. Робота над MilHRMS
+починається лише після explicit owner acceptance повного RC1.
+Інакше кажучи, RC1 включає Qt; проміжний headless build не є повним RC1.
 
-> Спочатку довести повний локальний release Dagvane, включно зі stable IPC і
-> native C++20/Qt 6 GUI. Розробка MilHRMS через Dagvane починається лише
-> після проходження full-release acceptance gate.
+## Карта одним рядком
 
-«Повний release» — не рухома ціль: точний перелік required evidence для RC1
-зафіксований у стадії 8 нижче і не розширюється без нового owner рішення.
+```text
+D0 Council foundation
+  → R1 recovery
+  → G2 durable context and Goals
+  → G3 secure implementation worker
+  → G4 orchestration and self-development
+  → G5 stable IPC and Qt GUI
+  → RC1 full acceptance
+  → MilHRMS
+```
 
-## Правила виконання плану
+`D0` — коротка roadmap-назва вже створеного фундаменту G0/G1, а не новий
+паралельний milestone. Розшифрування назв — у [`GLOSSARY.md`](GLOSSARY.md).
 
-1. Одночасно **merge-authorized** лише одна dependency-ordered стадія. Водночас
-   незалежні модульні підзадачі наступних стадій можуть виконуватися як
-   `PARALLEL-HELD`: із frozen interface, окремими worktree, непересічними
-   файлами й рівно одним writer на isolated candidate. Це збільшує throughput,
-   але не закриває finding, stage або milestone. Такий candidate не можна
-   інтегрувати або робити новою базою, доки його попередня залежність не пройшла
-   acceptance gate.
-2. Робота interface-first починається з найменшого корисного versioned `V1`
-   contract і contract tests, а не з повного future API. Сумісні доповнення
-   оформлюються як capability/minor revision; несумісні — як explicit `V2` із
-   переходом. Старий контракт не можна ламати мовчки.
-3. Кожна стадія й кожна `PARALLEL-HELD` підзадача має clean pinned base SHA,
-   explicit deliverables, tests,
-   non-goals і max scope.
-4. Жоден implementation agent не отримує весь цей план як одну задачу.
-5. Candidate повністю committed; verification і review посилаються на exact
-   SHA, а не на назву гілки.
-6. Кожен isolated candidate проходить review щонайменше двох незалежних
-   моделей, judge disposition і, для BLOCKER/MAJOR, remediation loop на новому
-   SHA з повторним review.
-7. MINOR не створює автоматично дорогий remediation cycle; він потрапляє в
-   TODO з disposition.
-8. Owner зберігає merge/push/integration authority.
-9. Архітектура наступної стадії деталізується безпосередньо перед її
-   реалізацією, не на кілька стадій наперед.
-10. Кожна стадія оновлює [`TODO.md`](TODO.md); статуси й counts не
-   дублюються по інших docs.
-11. Конкурентні реалізації одного interface дозволені лише як окремі committed
-    candidates. Тільки integrator/glue writer редагує integration seam і
-    з'єднує accepted SHA після acceptance dependencies. Потрібна зміна module
-    interface повертається його власнику як окрема bounded задача: сумісна
-    capability або explicit `V2` проходить власний review/judge до інтеграції.
+## Як переходити між фазами
 
-Стандартний code gate для будь-якої стадії:
+- Одна фаза є merge-authorized; наступні можуть готувати лише незалежні
+  `PARALLEL-HELD` модулі.
+- Кожен parallel module починається з мінімального frozen interface і contract
+  tests.
+- Кожна задача мала й bounded: exact base, конкретний вихід, tests і
+  non-goals.
+- Один writer працює в одному isolated worktree.
+- Candidate повністю committed; gates і review перевіряють exact SHA.
+- BLOCKER або MAJOR означає remediation на новому SHA та повторний review.
+- Held module не можна інтегрувати до acceptance його залежності.
+- Integrator з'єднує лише accepted module SHAs після dependency gate.
+- Власник зберігає merge, push і final integration authority.
+
+Стандартний code gate:
 
 ```bash
 uv run pytest
@@ -57,220 +48,224 @@ uv run ruff check .
 uv run mypy
 ```
 
-Effectful/safety стадії додатково потребують deterministic adversarial
-probes, crash injection і independent exact-SHA review.
+Security та process phases також потребують deterministic adversarial і crash
+probes.
 
 ---
 
-## Стадія 1 — Прийнятий фундамент Council (G0/G1)
+## МИ ТУТ: R1 recovery, merge-authorized R1-A
 
-**Мета:** довести, що детермінований і живий multi-provider Council
-працюють, зберігають стан і чесно рахують budget.
+R1 відновлює неприйнятий Workspace Autonomous Developer після security і
+durability review. Merge-authorized напрям зараз — R1-A: canonical
+filesystem-backed identifiers і fail-closed path/worktree containment.
 
-**Чому:** Council — єдина частина системи, яку сьогодні безпечно
-використовувати; вона ж перевіряє durable event-sourced підхід, на якому
-будуються майбутні стадії.
+Цей напис показує поточну фазу плану, але не є status ledger. Який candidate
+активний, які verdict отримані та які held lanes вже reviewed, дивіться у
+[`картці поточного стану`](TODO.md#live-dashboard).
 
-**Вхідна умова:** —, це стартова стадія.
+До інтегрованого R1-H workspace-команди не використовуються на реальних або
+цінних репозиторіях.
 
-**Доказ завершення:** fixed `council-v1` template, FakeBackend, strict
-document validation, durable gapless journal, content-addressed artifacts,
-fail-closed replay, budgets — offline; плюс native Anthropic і generic
-OpenAI-compatible adapters, live profiles, usage/cost accounting, opt-in live
-tests.
+R1 поділений на малі перевірювані частини:
 
-**Що свідомо поза межами:** workspace/goal runtime, зовнішні coding agents,
-generic orchestration DAG.
-
-**Статус:** прийнято. Exact accepted SHA — у [`TODO.md`](TODO.md).
-
----
-
-## Стадія 2 — R1: безпечний Autonomous Developer
-
-**Мета:** зробити filesystem, process lifecycle, evidence і review для
-автономної розробки настільки ж чесними й crash-safe, як у Council, перш ніж
-дозволити її на реальному репозиторії.
-
-**Чому:** незалежний exact-SHA review виявив 4 BLOCKER і 7 MAJOR findings:
-path escape, durable credential leakage, неповний process cleanup, розриви
-cancellation, evidence-команди, які самі стають писарями коду, review
-fail-open і втрату contributor provenance. Жоден із них не можна ігнорувати
-на цінному репозиторії.
-
-**Вхідна умова:** прийнята стадія 1.
-
-**Доказ завершення:** усі 11 findings закриті окремими focused regressions
-(R1-A…R1-G), потім один integration candidate (R1-H) проходить consolidated
-adversarial suite, стандартні gates і independent exact-SHA review з zero
-BLOCKER/MAJOR.
-
-**Що свідомо поза межами:** новий secure implementation worker,
-ToolBroker, реальний OS sandbox — це стадія 4.
-
-> **МИ ТУТ.** Точна активна підстадія, current checkpoint, наступна bounded
-> задача та stop gate завжди показані в єдиній змінній
-> [`картці поточного стану`](TODO.md#картка-поточного-стану). Roadmap навмисно
-> не дублює цю назву, щоб не застарівати після кожного checkpoint.
-
-Сім малих code sprints (R1-A…R1-G) плюс окрема інтеграційна acceptance
-(R1-H). Кожен sprint має власний base/candidate SHA, focused regressions і
-bounded review; вони не об'єднуються в одну задачу:
-
-| Sprint | Закриває | Фокус |
+| Частина | Що виправляє | Вихід |
 |---|---|---|
-| R1-A | `SEC-001` | Canonical ID і path containment для filesystem-backed identifiers. |
-| R1-B | `SEC-002`, `RES-001` | Secret-safe і bounded process output. |
-| R1-C | `RUN-001`, `RUN-002` | Spawn fencing і повне process-tree termination. |
-| R1-D | `RUN-003` | Monotonic, non-racing cancellation. |
-| R1-E | `EVD-001`, `EVD-002` | Evidence-команди не пишуть код; чиста baseline isolation. |
-| R1-F | `REV-001`, `PROV-001` | Review integrity і contributor provenance. |
-| R1-G | `RTE-001` | Escalation при відсутності реального прогресу. |
-| R1-H | усі 11 | Integrated recovery acceptance. |
+| R1-A | Небезпечні identifiers, paths і destructive worktree lifecycle. | Canonical IDs; доведене ownership; відмова без видалення чужих файлів. |
+| R1-B | Secrets і необмежений process output. | Scrub-before-persist і чесні memory/file/output bounds. |
+| R1-C | Process spawn, ownership і termination. | Durable identity до effect; повна TERM→KILL/reap. |
+| R1-D | Cancellation races. | Monotonic state transitions і доведена quiescence. |
+| R1-E | Нечесні verification/baseline commands. | Fresh exact-SHA view; evidence-команди не можуть писати candidate code. |
+| R1-F | Review і contributor provenance. | Strict review documents, pinned reviewer input і durable authorship. |
+| R1-G | Повторення без прогресу. | Escalation за новим evidence або чесний terminal BLOCKED. |
+| R1-H | Усі попередні частини разом. | Один clean integration SHA, full gates і zero unresolved BLOCKER/MAJOR. |
+
+### Вхід R1
+
+- D0 Council foundation існує як прийнята reference implementation для
+  durable state, budgets і fail-closed replay.
+- Workspace candidate існує, але не має product acceptance.
+- Findings зафіксовані в TODO та мають deterministic reproductions.
+
+### Вихід R1
+
+- Усі recovery findings мають regressions і accepted disposition.
+- Integrated candidate проходить повний suite, lints, type checks і
+  adversarial review.
+- Independent exact-SHA review не має unresolved BLOCKER/MAJOR.
+- Owner окремо вирішує інтеграцію.
+
+### Не входить у R1
+
+Новий sandboxed implementation worker, ToolBroker, general workflow engine і
+GUI. R1 лише робить наявні workspace primitives чесними настільки, щоб на них
+можна було далі будувати.
 
 ---
 
-## Стадія 3 — G2: контекст, provider sessions, durable Goal runtime
+## D0 — Council foundation
 
-**Мета:** Dagvane сам володіє логічним станом розмови й Goal, а не покладається
-на provider-native сесію чи один overwrite-файл.
+### Вхід
 
-**Чому:** без цього немає чесного resume/reconstruct після втрати сесії чи
-падіння процесу, і Council/Workspace продовжують жити за різними правилами
-durability.
+Чистий Python package та fixed `council-v1` workflow.
 
-**Вхідна умова:** прийнята стадія 2 (R1-H).
+### Вихід
 
-**Доказ завершення:** типізовані контракти для `LogicalConversation`,
-`ProviderSession`, `ContextSnapshot`, continuity policies (`fresh`, `resume`,
-`reconstruct`); durable `GoalSpec`/`CompletionCondition`/attempts/evidence з
-crash-safe recovery; vendor-neutral resource catalog і bounded read-only
-workers.
+- deterministic FakeBackend Council;
+- opt-in live provider adapters;
+- strict task, fixture і profile documents;
+- append-only journal та content-addressed artifacts;
+- fail-closed replay;
+- budget admission і honest usage accounting;
+- accepted Council CLI.
 
-**Що свідомо поза межами:** запис коду зовнішнім agent без sandbox,
-production ExternalAgent admission.
+### Не входить
 
----
+Workspace Goal runner, coding agents, general orchestration і GUI.
 
-## Стадія 4 — G3: нативний implementation worker, ToolBroker, реальний sandbox
-
-**Мета:** дати Dagvane власного, контрольованого worker для зміни коду з
-явними approvals і containment, а не покладатися на зовнішній CLI без
-доведеної ізоляції.
-
-**Чому:** генерований код за замовчуванням має `sandbox=required`; без
-механізму ізоляції запуск має fail-closed, а не мовчки виконуватись на host.
-
-**Вхідна умова:** прийнята стадія 3.
-
-**Доказ завершення:** ToolBroker з explicit DENY/ASK/ALLOW policy; platform
-preflight, що фіксує containment/network/resource limits; native
-`DagvaneAgentWorker` як primary writer; two-phase hash-bound local
-integration (scratch-ref → verify → approval digest → atomic compare-and-swap
-update-ref); перший контрольований dogfood-цикл на реальній малій зміні
-Dagvane; окремий E-AGENT probe для admission Codex/Claude Code/`agy`.
-
-**Що свідомо поза межами:** validated general orchestration DAG, adaptive
-routing, self-development proofs.
+Acceptance evidence — у [`TODO.md`](TODO.md).
 
 ---
 
-## Стадія 5 — G4: валідовані workflows, повний Council, self-development
+## G2 — Durable context and Goals
 
-**Мета:** перейти від fixed workflows до validated загального DAG із
-adaptive routing, і довести, що Dagvane може безпечно змінювати власний код
-двічі поспіль, включно з відновленням після kill-9.
+### Вхід
 
-**Вхідна умова:** прийнята стадія 4.
+Прийнятий integrated R1-H.
 
-**Доказ завершення:** reusable validated workflows (single worker, council,
-parallel review, architecture→implementation, test/fix); adaptive cost-aware
-routing з anti-runaway; окремий versioned full six-phase council поверх
-збереженого `council-v1`; дві послідовні self-development зміни Python
-engine з обов'язковим injected kill-9 і resume новим процесом.
+### Вихід
 
-**Що свідомо поза межами:** stable IPC, GUI.
+- Dagvane володіє canonical conversation history;
+- `fresh`, `resume` і `reconstruct` мають різні explicit contracts;
+- кожен важливий model call має `ContextSnapshot`;
+- Goal, attempts, approvals, evidence й terminal state переживають crash;
+- Council і Goal runtime використовують узгоджені durability semantics;
+- read-only workers мають bounded vendor-neutral routing.
 
----
+### Не входить
 
-## Стадія 6 — Стабільний versioned engine IPC
-
-**Мета:** дати майбутньому GUI єдиний, версійований command/result протокол
-поверх Python engine — на відміну від сьогоднішнього event NDJSON, який не є
-IPC для GUI.
-
-**Вхідна умова:** прийнята стадія 5.
-
-**Доказ завершення:** окремий E-IPC harness і owner-approved ADR обирають
-один v1 transport/lifecycle contract; реалізований protocol version,
-journal-first ordering, bounded frame size, explicit cancellation і
-backpressure semantics; golden fixtures, stress і negative/fuzz tests.
-
-**Що свідомо поза межами:** будь-який C++/Qt код.
+Запис або запуск model-modified code без доведеного sandbox.
 
 ---
 
-## Стадія 7 — Нативний C++20/Qt 6 GUI як тонкий клієнт
+## G3 — Secure implementation worker
 
-**Мета:** desktop-клієнт, який показує стан і керує runs через IPC зі
-стадії 6, не дублюючи жодної provider/orchestration/tool/Git логіки в C++.
+### Вхід
 
-**Вхідна умова:** прийнята стадія 6 (заморожений protocol version).
+Прийнятий G2 context/Goal foundation.
 
-**Доказ завершення:** CMake C++20/Qt 6 проєкт; QProcess-клієнт до engine;
-типізовані view models; QtTest покриття; повна поверхня — project/workspace,
-conversations/goals, council, run monitor, providers/routes, context/memory
-inspector, artifacts, tool approvals, Git candidate/review/integration gate,
-budgets, settings.
+### Вихід
 
-**Що свідомо поза межами:** нова engine-логіка, яку не видно через IPC.
+- ToolBroker видає конкретні `DENY`, `ASK` або `ALLOW` permissions;
+- platform preflight доводить filesystem, process, network і resource limits;
+- model-modified code має `sandbox=required` за default;
+- native Dagvane worker є основним writer;
+- candidate integration є hash-bound і two-phase;
+- зовнішні coding agents допускаються лише після окремого conformance probe;
+- виконано перший малий контрольований dogfood cycle.
 
----
+### Не входить
 
-## Стадія 8 — Повна acceptance RC1 (CLI + engine + IPC + GUI)
-
-**Мета:** один clean exact SHA, де CLI, Python engine, IPC і Qt GUI разом
-проходять повний acceptance — full RC1 йде **після** Qt, а не headless
-release до нього.
-
-**Вхідна умова:** прийняті стадії 1–7.
-
-**Доказ завершення:** build/run CLI і Qt GUI; deterministic fake council;
-opt-in real council із ≥2 provider families; Dagvane-owned context і session
-reconstruct; ExternalAgent support для доступних runtimes; persistent
-Goals з evidence-based completion; tools/approvals і candidate worktree з
-чесними containment limits; crash/restart і cancellation tests; budgets і
-anti-runaway routing; council та implementation-review-remediation
-workflows; native-worker self-development proofs, включно з kill-9/resume;
-versioned IPC stress harness; Python (`pytest`/`ruff`/`mypy`) і C++
-(configure/build/QtTest) gates green; no secrets у логах/артефактах; no
-automatic push/merge; повний independent exact-SHA review і owner
-acceptance.
-
-**Що свідомо поза межами:** MilHRMS-специфічна логіка.
+General DAG, adaptive routing і GUI.
 
 ---
 
-## Стадія 9 — MilHRMS лише після explicit owner acceptance RC1
+## G4 — Orchestration and self-development
 
-**Мета:** почати MilHRMS через Dagvane тільки тоді, коли повний local
-release прийнятий власником, а не як паралельний або достроковий шлях.
+### Вхід
 
-**Вхідна умова:** owner explicit acceptance стадії 8.
+Прийнятий G3 worker та ToolBroker.
 
-**Доказ завершення:** послідовність із durable Goal contract: read-only
-аналіз MilHRMS → owner уточнює must-have/non-goals → `goal prepare` формує
-contract з exact base SHA, tests, budgets і синтетичною data policy → owner
-review/approve → bounded Goal execution з verification і independent review
-→ owner приймає exact candidate SHA і контролює integration.
+### Вихід
 
-**Що свідомо поза межами:** Goal, сформульований як «finish MilHRMS» одним
-кроком; реальні personnel records у development/test agents.
+- validated workflows для single worker, Council, parallel review,
+  architecture→implementation і test/fix;
+- general plan validator для dependencies, permissions і budgets;
+- adaptive cost-aware routing з anti-runaway policy;
+- повний versioned Council workflow поверх збереженого `council-v1`;
+- дві послідовні self-development зміни engine;
+- одна зі змін проходить injected kill-9 і resume новим процесом.
+
+### Не входить
+
+Stable desktop IPC або Qt code.
 
 ---
 
-## Дати і implemented features
+## G5 — Stable IPC and Qt GUI
 
-Цей план навмисно не містить дат і не стверджує, що щось "буде готово" на
-конкретний тиждень. Кожна стадія переходить у наступну лише через явний
-acceptance evidence у [`TODO.md`](TODO.md), не через календар.
+G5 має дві послідовні внутрішні частини. GUI не починається до замороженого
+IPC contract.
+
+### Вхід
+
+Прийнятий G4 engine.
+
+### Вихід, частина 1: engine IPC
+
+- owner-approved versioned command/result protocol;
+- handshake, request/result correlation і approval frames;
+- journal-first ordering, catch-up і bounded frames;
+- explicit backpressure, cancellation та crash behavior;
+- golden, negative, fuzz і stress tests.
+
+### Вихід, частина 2: C++20/Qt 6 GUI
+
+- CMake/Qt project і `QProcess` client до Python engine;
+- typed client protocol і view models;
+- project, conversation, Goal, Council, run, artifact, approval, Git candidate,
+  budget і settings views;
+- QtTest coverage;
+- у C++ немає provider, orchestration, tool або Git business logic.
+
+### Не входить
+
+MilHRMS-specific functionality.
+
+---
+
+## RC1 — Full release acceptance
+
+### Вхід
+
+Прийняті D0, R1, G2, G3, G4 і G5.
+
+### Вихід
+
+Один clean exact SHA, на якому разом перевірені:
+
+- CLI, Python engine, IPC і Qt GUI;
+- deterministic і opt-in live Council;
+- durable context, Goal recovery й cancellation;
+- secure implementation/review/remediation workflow;
+- sandbox, tools, permissions, budgets і anti-runaway limits;
+- self-development crash/resume proof;
+- Python та C++ quality gates;
+- відсутність secrets у logs та artifacts;
+- відсутність automatic push/merge;
+- independent exact-SHA review і explicit owner acceptance.
+
+### Не входить
+
+MilHRMS domain code.
+
+---
+
+## MilHRMS — лише після RC1
+
+### Вхід
+
+Власник явно прийняв повний RC1.
+
+### Вихід
+
+Окремий bounded Goal: read-only analysis, owner-confirmed scope, synthetic data
+policy, exact base, budgets, implementation, verification, independent review
+і owner-controlled integration.
+
+### Не входить
+
+Одна безмежна задача «finish MilHRMS» або передача реальних personnel records
+development agents.
+
+Календар не замінює acceptance. Кожна стрілка на карті проходиться лише тоді,
+коли потрібний evidence записано в [`TODO.md`](TODO.md).

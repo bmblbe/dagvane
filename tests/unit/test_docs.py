@@ -145,19 +145,34 @@ def test_current_checkpoint_and_stop_gate_are_explicit() -> None:
     for unsafe_surface in ("goal prepare", "goal approve", "conversations show/use"):
         assert unsafe_surface in readme
 
-    assert "4 BLOCKER" in todo
-    assert "7 MAJOR" in todo
-    assert "7c9d982caed501605caa72e474651ba907b2bf18" in todo
-    assert "source SHA, не поточний `main`" in todo
-    assert "495b5f1b551642ce3f5bdcbe2853775d00a3fc1d" in todo
-    assert "R1-A" in todo
-    assert "process-record authority" in todo.lower()
-    assert "managed Git worktree ownership" in todo
-    assert "PARALLEL-HELD" in todo
-    assert "R1-B1" in todo
-    assert "R1-C0" in todo
-    assert "MilHRMS" in todo
-    assert "RC1" in todo
+    for fact in (
+        "4 BLOCKER",
+        "7 MAJOR",
+        "b846dfd3b9027e25a37d9be055c6764a2a4ed536",
+        "7c9d982caed501605caa72e474651ba907b2bf18",
+        "35c6a9cafc8f255da7a1dc539e08dac13f64ebd8",
+        "3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6",
+        "a5878da0e2a3d21f6076505bf5f050aea6e717f4",
+        "fb7331e08c1661055c4b9b784b8b2b27fa3f61d5",
+        "3df316bdfefdb8a2cbbf685b42febbd6c43d08af",
+        "Fable remediation",
+        "R1-A",
+        "R1-B1",
+        "R1-C0",
+        "R1-D0",
+        "R1-E0",
+        "R1-F0",
+        "R1-G0",
+        "HELD-ACCEPTED",
+        "PARALLEL-HELD",
+        "MilHRMS",
+        "RC1",
+    ):
+        assert fact in todo, f"TODO must carry current live fact {fact!r}"
+    assert todo.count("`REVISE`") >= 2
+    assert "не має product acceptance" in todo
+    assert "process record" in todo.lower()
+    assert "Destructive worktree API" in todo
 
 
 def test_parallel_module_workflow_preserves_dependency_order() -> None:
@@ -171,7 +186,42 @@ def test_parallel_module_workflow_preserves_dependency_order() -> None:
     assert "merge-authorized" in plan
     assert "frozen interface" in plan
     assert "не можна інтегрувати" in normalized_plan
-    assert "accepted SHA" in plan
+    assert "accepted module" in plan
+
+
+def test_development_plan_is_one_linear_owner_decided_route() -> None:
+    plan = _read("docs/DEVELOPMENT_PLAN.md")
+    phases = ("D0", "R1", "G2", "G3", "G4", "G5", "RC1", "MilHRMS")
+    roadmap = plan[plan.index("## Карта одним рядком") : plan.index("## Як переходити")]
+    positions = [roadmap.index(phase) for phase in phases]
+    assert positions == sorted(positions)
+    assert "МИ ТУТ: R1 recovery, merge-authorized R1-A" in plan
+    assert "RC1 включає" in plan
+    assert "C++20/Qt 6 GUI" in plan
+    assert "MilHRMS" in plan
+
+
+def test_todo_expands_finding_prefixes_and_keeps_sec001_regressions() -> None:
+    todo = _read("docs/TODO.md")
+    for expanded_id in (
+        "Security 001 (`SEC-001`)",
+        "Security 002 (`SEC-002`)",
+        "Resource 001 (`RES-001`)",
+        "Runtime 001 (`RUN-001`)",
+        "Evidence 001 (`EVD-001`)",
+        "Review 001 (`REV-001`)",
+        "Provenance 001 (`PROV-001`)",
+        "Routing 001 (`RTE-001`)",
+    ):
+        assert expanded_id in todo
+    for regression in (
+        "absolute, `..` і symlink Goal identifiers",
+        "absolute, `..` і symlink Conversation identifiers",
+        "root, parent і sibling sentinels",
+        "Git worktree registration",
+        "manifest із підміненою internal identity",
+    ):
+        assert regression in todo
 
 
 STABLE_DOCS_WITHOUT_VOLATILE_SHAS = (

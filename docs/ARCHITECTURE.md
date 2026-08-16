@@ -1,256 +1,191 @@
 # Архітектура Dagvane
 
-Цей документ описує фактичну архітектуру поточного коду та цільові межі
-першого повного local release. Він не перетворює неприйнятий candidate на
-готову систему: maturity кожної частини позначена явно, а конкретний exact
-SHA і статус кожного findings — тільки в [`TODO.md`](TODO.md), не тут.
-Терміни — у [`GLOSSARY.md`](GLOSSARY.md).
+Dagvane — headless Python engine, який планує multi-model workflows, зберігає
+їхній стан, контролює effects і готує Git candidate для рішення власника.
+Сьогодні інтерфейсом є CLI. Майбутній C++20/Qt 6 GUI буде тонким клієнтом того
+самого engine.
 
-## Авторитет і порядок вирішення суперечностей
+Цей документ описує стабільні межі, а не поточний candidate. Реальна maturity,
+findings і exact SHA завжди в [`TODO.md`](TODO.md). Терміни пояснені в
+[`GLOSSARY.md`](GLOSSARY.md).
 
-Dagvane має три різні види істини:
+## Що є джерелом правди
 
-1. **Нормативний намір:** explicit owner decisions, новіші ADR та accepted
-   Round 4 architecture з урахуванням amendments.
-2. **Фактична реалізація:** code, tests, Git state і independent evidence на
-   exact SHA. Якщо документ описує властивість, яку probe спростовує, перемагає
-   probe/code evidence.
-3. **Порядок розробки:** [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), а
-   поточний статус і defects — [`TODO.md`](TODO.md).
+Коли джерела суперечать одне одному, використовуйте такий порядок:
 
-Immutable research history лежить у [`architecture/history/`](architecture/history/).
-Вона пояснює походження рішень, але не є current implementation guide.
-Прийняті рішення лежать у [`architecture/decisions/`](architecture/decisions/)
-і не переписуються заднім числом.
+1. owner decisions і новіші Architecture Decision Records (ADR);
+2. code, tests, Git state та independent evidence на exact SHA;
+3. [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md) для порядку фаз і
+   [`TODO.md`](TODO.md) для live status.
 
-Попередні active docs за owner choice перенесені без redirect stubs у
-[`archive/2026-08-15-pre-reset/`](archive/2026-08-15-pre-reset/README.md).
-Через immutable policy два старі ADR зберігають historical operational links;
-archive manifest містить їхній exact path/hash mapping. Це навмисний виняток
-із active-link contract, а не друге джерело істини.
+`architecture/history/` пояснює минулі рішення, але не є поточною інструкцією.
+Прийняті ADR у `architecture/decisions/` не редагуються заднім числом.
 
 ## System context
 
-Dagvane має бути постійним orchestrator між людиною, репозиторієм,
-детермінованими tools, raw model APIs та autonomous coding runtimes.
-
 ```text
-                    ┌───────────────────────────┐
-owner / CLI / Qt ──►│      Dagvane engine       │
-                    │ plans, state, policy,      │
-                    │ evidence, budgets          │
-                    └───┬────────┬────────┬──────┘
-                        │        │        │
-                 ChatBackend  External  deterministic
-                    APIs       Agents    tools/Git/tests
-                        │        │        │
-                    providers  Codex/    workspace and
-                    /models    Claude/agy build systems
+owner
+  │
+  ├── CLI сьогодні
+  └── Qt GUI у майбутньому
+          │
+          ▼
+  ┌──────────────────────────────┐
+  │ Dagvane Python engine        │
+  │ goals · workflows · policy   │
+  │ state · budgets · evidence   │
+  └───────┬─────────┬────────────┘
+          │         │
+          │         └── deterministic tools, Git, tests
+          ├── model-provider APIs through ChatBackend
+          └── coding CLI processes through ExternalAgent
 ```
 
-Людина залишається integration authority. Навіть успішний workflow може лише
-підготувати reviewed candidate SHA; push і final merge не автоматизуються.
+Власник залишається integration authority. Навіть успішний run може лише
+підготувати reviewed candidate SHA; automatic push або final merge не є
+частиною engine contract.
 
-## Фактична система: два vertical slices
+## Реальність сьогодні: два runtime
 
-Поточний код ще не має одного універсального orchestration runtime. Є два
-окремі зрізи з різними domain types і persistence contracts.
+Поточний package не має одного універсального workflow engine. У ньому є два
+vertical slices з різною зрілістю й різними правилами збереження.
 
-### 1. Прийнятий Council runtime
+### 1. Accepted Council runtime
 
 ```text
-TaskSpec / Fixture / LiveProfile
-  → strict document validation
-  → fixed CouncilTemplate
-  → PlanValidator
-  → RunExecutor + BudgetLedger
-  → ChatBackend resolver
-  → Fake | Anthropic | OpenAI-compatible adapter
-  → FilesystemRunStore + ArtifactStore
-  → EventEnvelope NDJSON journal
+Task + Fixture або Live Profile
+  → strict parser
+  → fixed council-v1 plan
+  → budgeted model calls
+  → append-only events + artifacts
   → fail-closed replay
-  → Decision + RunReport
+  → decision + report
 ```
 
-`council-v1` є fixed DAG із п'яти model nodes:
+Council запускає двох незалежних proposers, дві blind reviews і judge. Його
+прийнятий scope включає:
 
-```text
-proposer A ─┐
-            ├─ barrier ─► blind review A/B ─► judge
-proposer B ─┘
-```
-
-Прийняті властивості:
-
-- незалежні proposals і blind cross-review;
-- strict task/fixture/profile validation;
-- gapless append-only event sequence;
+- strict input documents;
+- deterministic FakeBackend та opt-in live adapters;
+- gapless event journal;
 - content-addressed artifacts;
-- deterministic replay derived views;
-- budget admission і postconditions;
-- normalized invocation receipts/errors;
-- offline FakeBackend та opt-in live adapters;
-- no automatic provider retries.
+- budget admission та honest usage accounting;
+- derived reports і fail-closed replay;
+- відсутність automatic provider retries.
 
-Обмеження: executor не продовжує incomplete council після engine crash.
-Replay reconstructs meaningful recorded state, але не є execution resume.
+Replay читає й перевіряє вже записану історію. Він не продовжує incomplete
+execution після process crash.
 
-### 2. Неприйнятий Workspace Autonomous Developer
+### 2. Experimental Workspace Autonomous Developer
 
 ```text
 workspace CLI
-  → file-backed LogicalConversation candidate
-  → model-generated Goal Contract draft
-  → owner approve + baseline commands
-  → fixed GoalRunner loop
-  → resource router
-  → ExternalAgent subprocess
-  → candidate Git worktree
-  → checks / verification / review / remediation
-  → goal.json + run-state.json + log.jsonl
+  → conversation
+  → Goal draft and owner approval
+  → external coding agent
+  → Git worktree
+  → checks, review and remediation
+  → candidate commit
 ```
 
-Цей зріз існує в коді, але independent exact-SHA review виявив у ньому
-серйозні defects: path escape, durable credential leakage, неповний process
-cleanup та інші. Актуальний перелік і статус кожного finding веде
-[`TODO.md`](TODO.md), не цей документ. Слайс не використовує Council `Run`,
-`EventEnvelope`, `FilesystemRunStore` або replay validator. Його state machine
-fixed, а не generic validated DAG.
+Цей slice існує в коді, але ще не має product acceptance. Він використовує
+окремі files для Goal, run state, logs, conversations і agent runs, а не
+Council event store. Security, crash recovery, process ownership і review
+проходять R1 remediation; актуальний stop gate — у [`TODO.md`](TODO.md).
 
-До recovery acceptance (дивись `TODO.md`) заборонено називати цей runtime
-crash-safe, secret-safe, exact-SHA-safe або придатним для unattended
-development.
+Наявність команди або тесту не переносить гарантії Council на Workspace.
 
-## Layer boundaries
+## Layers, ports і adapters
 
-Binding цільовий напрям:
+Цільовий напрям залежностей:
 
 ```text
 domain ← application ← adapters ← interface/composition
 ```
 
-- **domain**: immutable values, invariants, state transitions, errors;
-- **ports**: capabilities, які application потребує від зовнішнього світу;
-- **application**: orchestration і policy без vendor/process implementation;
-- **adapters**: filesystem, provider SDK, subprocess, Git, clock;
-- **interface**: CLI та майбутній IPC/Qt client.
+### Domain
 
-Фактичний import graph ширший:
+Domain містить правила й immutable values: task, plan, event, budget, state,
+error. Він не викликає filesystem, Git, network, subprocess чи vendor SDK.
 
-```text
-domain
-├── ports ───────────────► domain
-├── protocol ────────────► domain
-├── workspace ───────────► domain
-├── adapters ────────────► domain + ports + protocol + workspace
-├── application ─────────► domain + ports + protocol + workspace
-│                          + concrete adapters  [debt]
-└── cli* ────────────────► application + adapters + protocol + workspace
-```
+### Ports
 
-Підтверджений debt:
+Port — вузький Python contract того, що application потребує від зовнішнього
+світу. Наприклад:
 
-- `application.autodev` напряму імпортує local-execution/subprocess adapter;
-- `application.prepare` напряму виконує Git/shell через adapter;
-- `application.localmodel` створює concrete OpenAI-compatible backend.
+- `ChatBackend` — один model request і result;
+- `ExternalAgent` — autonomous process із cwd та lifecycle;
+- storage ports — journal, artifact і run store;
+- runtime ports — clock та ID source.
 
-До G2/G3 ці effects мають бути винесені за explicit ports і зібрані в
-composition root. Contract test повинен перевіряти dependency direction, а не
-лише забороняти окремі vendor imports.
+Application залежить від port, а не від конкретної бібліотеки чи executable.
 
-## Domain concepts
+### Application
 
-### Council domain
+Application визначає порядок кроків, budget policy, replay, Goal transitions
+і orchestration. Новий code не повинен створювати provider, Git або subprocess
+implementation усередині application.
 
-Реалізовані explicit concepts включають `TaskSpec`, `Run`, `Plan`, `PlanNode`,
-`EventEnvelope`, `ArtifactRef`, `Budget`, `ModelRoute`, run/node states та
-invocation accounting. Boundary documents валідовуються окремо від internal
-immutable data.
+### Adapters
 
-`Decision` і `RunReport` є derived documents. Canonical history повинна
-лишатися recoverable з events/artifacts.
+Adapter реалізує port через конкретний mechanism: filesystem, Anthropic,
+OpenAI-compatible HTTP, subprocess або Git. Vendor SDK дозволений тільки тут і
+імпортується ліниво.
 
-### Workspace/autonomy domain
+### Interface та composition
 
-Кандидат має `ConversationInfo`/`ConversationStore`, `GoalContract`,
-`GoalRecord`, `RunState`, resource entries та agent request/result. Частина
-цих types живе в
-`application`, а не у спільному domain; state не інтегрований із Council
-events/attempts/artifacts/budgets.
+CLI розбирає input, вибирає adapters і перетворює result на stdout/stderr та
+exit code. Майбутній IPC server робитиме те саме через versioned frames. GUI
+не обходить engine й не імпортує Python business logic.
 
-Ціль повного release:
+Поточний Workspace candidate ще має прямі application→adapter imports. Це
+відомий architecture debt, а не дозволений напрям для нового коду.
 
-- durable `GoalSpec`, protected `CompletionCondition`, `GoalRun`, evidence та
-  evaluation;
-- explicit attempts, decisions, approvals, cancellation і terminal outcomes;
-- idempotency/fencing для effectful operations;
-- meaningful replay/reconstruct, а не лише останній overwrite snapshot;
-- однакова семантика reserved/actual/estimated/ceiling/unknown usage.
+## Основні concepts
 
-Це не вимагає одного гігантського Python class. Потрібен спільний domain
-contract із adapters для різних storage/execution mechanisms.
+### Model, provider, route і worker — різні речі
 
-## Model, provider, route та worker
-
-Ці поняття не взаємозамінні:
-
-| Concept | Відповідальність |
+| Concept | Просте пояснення |
 |---|---|
-| Model | Ідентифікатор inference capability у provider catalog. |
-| Provider/connection | Transport endpoint, auth reference і wire semantics. |
-| Route | Connection + model + limits + pricing snapshot + policy. |
-| ChatBackend | One-shot raw model invocation contract. |
-| Dagvane worker | Роль усередині validated workflow. |
-| ExternalAgent | Autonomous process із cwd, tools, session і lifecycle. |
-| ProviderSession | Optional native continuity reference, не canonical history. |
+| Model | Назва inference capability. |
+| Provider/connection | Endpoint, auth reference і transport rules. |
+| Route | Connection + model + limits + price snapshot + policy. |
+| ChatBackend | One-shot request/result contract. |
+| Dagvane worker | Роль усередині workflow. |
+| ExternalAgent | Окремий autonomous process із cwd, tools і lifecycle. |
+| Provider session | Optional external continuity handle, не canonical memory. |
 
-Generic OpenAI-compatible transport використовується лише там, де wire
-семантика справді сумісна. Native adapter потрібен, коли cancellation, usage,
-structured output або error semantics materially differ.
+OpenAI-compatible adapter використовується лише коли wire semantics справді
+сумісні. Однакова назва API не доводить однакові cancellation, usage або error
+contracts.
 
-Resource routing описується vendor-neutral tiers/capabilities, наприклад
-`LOCAL`, `CHEAP`, `STANDARD`, `STRONG`, `CRITICAL`. Model IDs і runtime names є
-configuration data, не domain enum.
+### Dagvane володіє context
 
-## Context і memory ownership
-
-Binding invariant з ADR-0001:
-
-> Dagvane owns logical conversation state. Provider-native sessions are
-> optional continuity optimizations.
+Canonical conversation history має належати Dagvane. Provider-native session
+може прискорити continuity, але не є джерелом правди.
 
 Потрібно розрізняти:
 
-- `LogicalConversation` — canonical user/assistant history;
-- `ProviderSession` — optional external handle;
-- `InstructionContext` — policy/instructions;
-- `WorkspaceContext` — selected repository evidence;
-- `ConversationState` — current conversational position;
-- `ProjectMemory` — durable accepted project knowledge;
-- `DurableRunState` — workflow/attempt state;
-- `ContextSnapshot` — exact input/provenance одного significant invocation.
+- `LogicalConversation` — повідомлення користувача й assistant;
+- `ProviderSession` — optional handle у provider;
+- `InstructionContext` — policy й instructions;
+- `WorkspaceContext` — вибрані repository facts;
+- `ProjectMemory` — accepted durable knowledge;
+- `DurableRunState` — workflow state;
+- `ContextSnapshot` — точний input і provenance конкретного model call.
 
-Continuity policies:
+Continuity policies також різні:
 
-- `fresh`: explicitly constructed context, new provider conversation;
-- `resume`: reuse native session, якщо policy дозволяє;
-- `reconstruct`: rebuild from Dagvane-owned state, start fresh externally.
+- `fresh` — новий зовнішній context;
+- `resume` — reuse native session, якщо policy це дозволяє;
+- `reconstruct` — відбудувати context із Dagvane-owned durable state.
 
-Поточний Workspace зберігає messages і per-exchange prompt artifacts.
-`session_ref` повертає саме `ExternalAgent` у `AgentExecution`, після чого chat
-записує його в conversation manifest. Council `InvocationReceipt` цього поля
-не має. Повний typed `ContextSnapshot` та ProviderSession reconstruct ще
-відсутні; збережений agent `session_ref` не керує resume.
+Повний typed context/reconstruct contract є target наступних фаз, не
+властивістю поточного Workspace candidate.
 
-Independent proposer/reviewer/judge contexts не можуть випадково ділити
-hidden provider session. Значний invocation повинен відповідати на питання:
-«що саме бачила модель?» — з source SHA, role, route/model, instructions,
-conversation range/summary, workspace fragments, memory/artifacts, budget і
-optional provider session reference.
+## Persistence
 
-## Persistence і recovery
-
-### Council store
+### Council
 
 ```text
 .dagvane/runs/<run-id>/
@@ -261,169 +196,103 @@ optional provider session reference.
   report.json
 ```
 
-Journal має gapless sequence і fsync ordering; artifacts адресуються SHA-256;
-replay валідує causal/state/budget contracts і відтворює derived views.
+Journal і artifacts — canonical. `decision.json` та `report.json` можна
+відбудувати з них. Storage failure не вигадує terminal success.
 
-### Workspace store
+### Workspace candidate
 
 ```text
 .dagvane/
   config.toml
-  conversations/<id>/{manifest.json,messages.jsonl}
-  conversations/current
-  goals/<name>/{goal.json,run-state.json,log.jsonl,lease.lock,...}
-  agent-runs/<execution-id>/...
-  worktrees/...
+  conversations/
+  goals/
+  agent-runs/
+  worktrees/
 ```
 
-Workspace helpers використовують atomic replace та JSONL append, але кілька
-файлів не утворюють atomic transaction. Recovery code закриває лише окремі
-відомі split-write cases. Confirmed cancellation/process/evidence races
-перераховані в `TODO.md`.
+Atomic replace одного файла не робить кілька files однією transaction.
+Workspace recovery має окремо довести ownership, idempotency, monotonic state,
+reaping і terminal consistency.
 
-Повний release потребує:
+`.dagvane/` є Git-ignored operational state. Це не sandbox і не сховище для
+plaintext credentials.
 
-- monotonic state transitions або explicit compare-and-swap/version;
-- attempt identity до першого external effect;
-- durable ownership/fencing;
-- restart/reconstruct усіх non-terminal workflows;
-- terminal consistency між goal, run, evidence та approvals;
-- orphan detection/reaping без PID-reuse trust;
-- storage failure як explicit outcome.
+## Filesystem identity і containment
 
-## Workflows і orchestration
+Filesystem-backed identifier не можна просто вставити в path. Boundary має:
 
-Спочатку реалізуються fixed typed workflows:
+1. перевірити canonical form;
+2. вивести target із trusted root та typed owner identity;
+3. довести resolved containment і filesystem object identity;
+4. повторно перевірити identity перед destructive effect;
+5. відмовити без cleanup, якщо доказ неповний або state не збігається.
 
-- single worker;
-- council;
-- parallel read-only analysis;
-- implement + independent review;
-- architecture → implementation;
-- test/fix/remediation loop;
-- persistent software-development Goal.
+String-prefix check недостатній. Symlink, path replacement і race після
+першої перевірки мають окремі regressions. Destructive worktree lifecycle
+потребує durable owner record поза target; довільний caller path не є proof of
+ownership.
 
-Після стабільних primitives може з'явитися validated general DAG. Dynamic
-Strategist, якщо буде доданий, лише генерує typed plan; validator відхиляє
-invalid dependencies, bindings, permissions або budgets до виконання.
+## Worktree не дорівнює sandbox
 
-Повний release додає окремий versioned council workflow поверх збереженого
-`council-v1`: independent proposals → cross-review → author revisions →
-primary synthesis → adversarial synthesis review → final disposition. Усі
-roles мають fresh contexts, fixed source/input hashes, self-review exclusion
-і explicit unresolved disagreement.
+Git worktree ізолює checkout files і branch/index state. Він не обмежує:
 
-Parallel readers можуть інспектувати один repo. Parallel writers не можуть
-редагувати один working tree; кожен writer потребує isolated candidate і
-immutable reviewed SHA.
+- які процеси можна запустити;
+- які інші paths процес може прочитати або змінити;
+- network access;
+- CPU, memory або output;
+- credentials у environment.
 
-Паралельні модулі розвиваються interface-first: frozen port і contract tests
-передують implementation. Кожен module candidate проходить competitive
-multi-model review; integrator з'єднує лише accepted SHAs через adapter/glue
-layer. Glue не має права приховувати порушення module contract або переносити
-business logic із engine до CLI/GUI.
+Sandbox — окремий OS-level mechanism. У майбутній G3 policy model-modified
+code має `sandbox=required`; якщо mechanism не доведено, execution відмовляє
+fail-closed. Це target, а не чинний обхід R1 stop gate.
 
-Production ExternalAgent допускається лише після native secure
-implementation slice та окремого E-AGENT probe. Без доведеного OS
-write-containment він може бути тільки supervised patch-artifact worker, не
-blind reviewer/direct writer. Bootstrap exit не залежить від ExternalAgent.
+Known credential values мають проходити shared scrubber до truncation,
+persistence, logs, artifacts або transfer іншій model.
 
-## Security та effect boundaries
+## Exact-SHA candidate contract
 
-Worktree не є sandbox. Full local release не може заявляти безпечне виконання
-generated code без окремих механізмів для:
+Branch name може рухатися; exact SHA називає один immutable commit. Тому
+надійний implementation cycle виглядає так:
 
-- canonical identifiers і resolved path containment;
-- symlink escape;
-- environment scrubbing і secret references;
-- network policy;
-- process tree, PID/PGID identity та orphan cleanup;
-- CPU/wall-time/output limits, memory limits де practical;
-- Git hooks/config/remotes і destructive operations;
-- bounded filesystem writes;
-- durable `DENY`, `ASK`, `ALLOW` approvals;
-- crash-safe effect/idempotency state.
+1. writer отримує clean pinned base;
+2. працює один у власному isolated worktree;
+3. durable identity записується до external effect;
+4. усі intended bytes commit-яться;
+5. tests працюють у fresh checkout exact candidate SHA;
+6. tracked mutation або moved HEAD робить evidence invalid;
+7. independent reviewer бачить той самий exact SHA;
+8. finding зберігається разом із disposition;
+9. remediation створює новий SHA;
+10. owner вирішує integration.
 
-Binding **майбутня G3 execution policy**: model-modified code має
-`sandbox=required` за default. Якщо approved mechanism недоступний,
-verification повертає
-`verify.refused{reason:no_sandbox}`, а run лишається recoverable `BLOCKED`.
-Єдиний майбутній G3 bypass — explicit per-run pre-execution owner grant `trusted-project`
-із durable чесним marker «generated code executes on host without isolation».
-Навіть тоді обов'язкові frozen argv, scrubbed allowlist environment без
-secrets, synthetic HOME/XDG, managed process group, resource/output limits та
-offline/provisioned dependencies. До R1-H цей виняток не реалізований і не
-скасовує чинний stop gate для valuable repositories.
+Verification і review commands не мають права непомітно ставати writers.
+Untracked cache не є deliverable й не доводить властивості Git tree.
 
-Поточний exact-SHA review підтвердив path traversal, raw secret persistence,
-effectful evidence commands, orphan writer, incomplete group termination і
-cancellation races. Це defects реалізації, а не прийнятні «worktree
-limitations».
+## Workflow strategy
 
-Відомі значення credentials повинні проходити shared scrubber **до** truncation,
-persistence, logs, artifacts, context transfer або іншого provider. Secrets
-зберігаються як indirect references; plaintext не є durable configuration.
+Спочатку будуються fixed typed workflows. General DAG допускається лише після
+стабільних primitives: validator має відхилити invalid dependency, permission
+або budget до effect.
 
-## Git candidate contract
+Паралельні readers можуть дивитися один repository. Паралельні writers мають
+окремі worktrees, frozen versioned interfaces й окремі candidate SHAs.
+Integrator з'єднує лише accepted modules; glue layer не переносить business
+logic у CLI або GUI.
 
-Цільовий implementation worker:
+## CLI та майбутній Qt GUI
 
-1. отримує clean pinned base SHA;
-2. працює як єдиний writer в isolated external worktree поза authoritative
-   `.dagvane` state root;
-3. persistить resource/attempt identity до effect;
-4. commit-ить усі intended bytes;
-5. запускає verification у fresh immutable checkout exact candidate SHA;
-6. invalidates evidence при moved HEAD/index/tracked mutation; disposable
-   untracked/ignored caches не переносяться між commands і не можуть бути
-   deliverable поза Git tree tested SHA;
-7. передає exact SHA та full diff independent reviewer;
-8. зберігає append-only findings/dispositions;
-9. після remediation створює новий candidate SHA;
-10. зупиняється перед human integration gate.
+Accepted Council CLI і experimental Workspace CLI використовують один parser,
+але мають різну maturity. Точна command surface — у root
+[`README.md`](../README.md).
 
-Acceptance/check/review commands не є прихованими implementation writers.
-Кожна evidence command стартує у fresh disposable exact-SHA checkout.
-Tracked mutation робить evidence invalid; untracked/ignored side effects
-discard-яться разом із checkout. Invalid owner check веде до contract
-amendment/evidence-invalid, а не до remediation implementation worker.
+Council event NDJSON — journal stream, не GUI protocol. Перед Qt потрібен
+versioned command/result IPC із handshake, correlation, approvals,
+backpressure, cancellation і bounded frames.
 
-Після review integration є two-phase: scratch-ref commit `M`, verify exact
-tree, hash-bound owner approval і atomic CAS update-ref з expected old target.
-Target drift дає `STALE`, не silent rebase/merge.
+Qt client запускає Python engine як окремий `QProcess`. У C++ живуть protocol
+client, view models, presentation і desktop integration. Providers, prompts,
+routing, workflows, tools, Git та Goal evaluation залишаються в engine.
 
-## Stable IPC та Qt boundary
-
-Поточний `protocol/frames.py` описує Council event journal. Це не готовий IPC.
-
-Перед GUI потрібен E-IPC harness і новий ADR. Accepted Round 4 baseline —
-QProcess зі stdout NDJSON та park-and-exit approvals через
-`resume --grant/--resolve`; новіший product target передбачає stdin/stdout
-command/result correlation та in-band approval frames. Implementation agent
-не обирає між ними: G5-0 вимірює lifecycle/crash/backpressure/UX, а owner ADR
-явно фіксує v1 і supersedes несумісну частину старого рішення.
-
-Незалежно від обраного transport IPC зберігає:
-
-- version/handshake і deterministic frame schemas;
-- journal-first ordering та catch-up з canonical events;
-- stdout only protocol frames, diagnostic stderr;
-- ≤1 MiB frame та artifact indirection;
-- cancellation `cancelling → kill/reap/reconcile → terminal-last`;
-- explicit cleanup-incomplete failure;
-- malformed-frame, lifecycle, golden, negative та stress contracts.
-
-Qt 6 client запускає Python engine через `QProcess`. У C++ дозволені protocol
-client, local view models, presentation і desktop integration. Provider,
-prompt, routing, orchestration, tools, Git та Goal evaluation залишаються у
-headless engine.
-
-## Де дивитись поточну зрілість
-
-Цей документ описує межі й контракти, а не те, який саме capability вже
-прийнятий сьогодні. Актуальна maturity кожного модуля — у
-[`MODULES.md`](MODULES.md); поточний exact SHA, findings і їхній статус —
-виключно у [`TODO.md`](TODO.md).
-
-MilHRMS development не починається до повного local release acceptance,
-визначеного в [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
+Порядок IPC→Qt→full RC1 описано в
+[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md). Реальна maturity модулів — у
+[`MODULES.md`](MODULES.md).

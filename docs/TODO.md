@@ -1,260 +1,172 @@
 # Поточний стан і TODO
 
-Це єдине канонічне місце для поточного стану, exact baseline, активних
-дефектів і наступної bounded task. Все, що змінюється часто — SHA, статуси,
-test counts — живе тільки тут. Roadmap (незмінна послідовність стадій) — у
-[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md). Архітектурні правила — у
-[`ARCHITECTURE.md`](ARCHITECTURE.md). Терміни — у [`GLOSSARY.md`](GLOSSARY.md).
+Це єдиний live dashboard Dagvane. Тут зберігаються поточні statuses, test
+evidence і точні Git SHA (Secure Hash Algorithm identifiers — ідентифікатори
+конкретних commits). Стабільна roadmap — у
+[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), системні правила — у
+[`ARCHITECTURE.md`](ARCHITECTURE.md), терміни — у
+[`GLOSSARY.md`](GLOSSARY.md).
 
-## Картка поточного стану
+## Live dashboard
 
-| Що | Значення |
+| Поле | Поточний факт |
 |---|---|
-| Baseline документаційного reset | `7c9d982caed501605caa72e474651ba907b2bf18` (source SHA, не поточний `main`) |
-| Останній прийнятий product checkpoint | `495b5f1b551642ce3f5bdcbe2853775d00a3fc1d` |
-| Merge-authorized стадія | **R1-A — filesystem identity and path safety** (ідентифікатори та безпека шляхів у файловій системі) |
-| Поточна merge-authorized підзадача | **managed Git worktree ownership** (керовані Git worktree з durable доказом власника) — `ACTIVE` |
-| Паралельні isolated lanes | **R1-B1** — streaming-secret/bounded-capture core: writer активний, candidate SHA ще немає, `OPEN/PARALLEL-HELD`; **R1-C0** — managed-process port candidate `36f2905d1724f96523675c22c6b2c0bdf885baa5`: judge verdict `REVISE` — 4 MAJOR, bounded remediation обов'язкова, candidate не accepted, `VERIFY/PARALLEL-HELD`; **R1-F0** — strict review-document V1/parser: writer активний, candidate SHA ще немає, `OPEN/PARALLEL-HELD`. Це throughput, не acceptance: жодна lane не закриває finding, stage або milestone і не змінює merge-authorized R1-A. |
-| Наступна інтеграція | Міграція writer/verify/review worktree на прийнятий manager, потім consolidated R1-A acceptance; лише після цього R1-B1 може перейти з held у merge-authorized integration. |
-| Що безпечно користувачу зараз | Тільки прийнятий Council runtime: `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. Все інше — нижче, "Stop gate". |
-| Stop gate | До R1-H жодна workspace-команда (`chat`, `conversations`, `config`, будь-яка `goal`) не дозволена на реальному або цінному репозиторії. |
-| Останній доказ | Process-record checkpoint `495b5f1…` прийнятий independent exact-SHA review: 762 passed, 1 skipped; Ruff/mypy clean; 0 BLOCKER/MAJOR. |
-| Що ще потребує review | Managed Git worktree ownership ще не має candidate. R1-C0 потребує bounded remediation, нового exact-SHA review і judge; product acceptance відсутній. Після двох bounded implementation checkpoints потрібен consolidated SEC-001 adversarial review. |
+| Repository `main` | `b846dfd3b9027e25a37d9be055c6764a2a4ed536` |
+| Прийнятий фундамент | G0 (deterministic Council) і G1 (live multi-provider Council) прийняті у своєму scope. |
+| Неприйнята поверхня | Workspace Autonomous Developer небезпечний і не має product acceptance. |
+| Merge-authorized робота | Recovery 1, part A (R1-A): Security finding 001 (SEC-001), canonical filesystem identifiers і fail-closed path/worktree containment. |
+| R1-A candidate base | `7c9d982caed501605caa72e474651ba907b2bf18` |
+| Відхилені R1-A candidates | `35c6a9cafc8f255da7a1dc539e08dac13f64ebd8` — `REVISE`; `3120c2e8ab6d91d4a73c6d457cfe1a562cd534d6` — `REVISE`. Обидва не accepted. |
+| Активна R1-A дія | Bounded Fable remediation; потім новий exact-SHA gate і незалежний review. |
+| Review-accepted held Version 1 (V1) modules | R1-C0 `a5878da0e2a3d21f6076505bf5f050aea6e717f4`; R1-E0 `fb7331e08c1661055c4b9b784b8b2b27fa3f61d5`; R1-F0 `3df316bdfefdb8a2cbbf685b42febbd6c43d08af`. Це accepted лише в isolated module scope; вони не закривають R1 і не мають права інтеграції. |
+| Інші active remediations | R1-B1, R1-D0 і R1-G0: remediation active, not accepted. |
+| User-safe Command-Line Interface (CLI) | Тільки `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. |
+| Stop gate | До integrated R1-H жодна workspace-команда не використовується на реальному або цінному repository. |
+| Далі | Прийняти R1-A exact candidate; потім інтегрувати dependency-safe held modules по черзі; завершити R1-H; лише тоді починати G2. |
+| Після продукту | Release Candidate 1 (RC1) включає Qt GUI; MilHRMS починається тільки після explicit owner acceptance RC1. |
 
-### Candidate SHA проти repository HEAD
-
-`495b5f1…` — це **прийнятий product checkpoint**, а не commit на гілці цього
-репозиторію. Він існує у власному ланцюжку ремедіації
-(`288e172…` → `93fac31…` → відхилені `6988788…`, `69ccf6a…` →
-`495b5f1…`) і стає частиною
-`main`/HEAD лише після окремого owner integration gate (див.
-[`DEVELOPMENT.md`](../DEVELOPMENT.md), розділ "Git та review policy"). Цей
-документаційний reset був підготовлений від source SHA `7c9d982…`; саме тому
-SHA в картці не намагається бути самопосилальним «поточним HEAD». Зміна
-документації не змінює й не приймає product code цих checkpoints.
-
-## Baseline
-
-| Поле | Значення |
-|---|---|
-| Package version | `0.3.0.dev0` |
-| G0 deterministic council | Accepted/verified (`g0-verified`) |
-| G1 live council | Accepted на `70e1e5f2ebfc64b90275da424f5f4f4184fbf5de` |
-| Autonomous Developer (R1) | У ремедіації; findings нижче |
-| MilHRMS | Відкладено до повного RC1 owner acceptance |
-
-Тестові counts і suite status оновлюються тут лише після повного gate на
-конкретному exact SHA; вони навмисно не дублюються в інших docs.
+`R1-Xn` означає bounded lane усередині recovery R1: літера задає outcome,
+цифра — окремий module slice або iteration. Exact SHA held module не є SHA
+`main`: він стає product base лише після dependency gate та owner integration.
 
 ## Stop gates
 
-- Не використовувати **жодну** workspace-команду (`chat`, `conversations`,
-  `config`, будь-яку `goal`) у реальному або цінному репозиторії до R1-H.
-  Path/persistence findings охоплюють `prepare`, `approve`, `show`, `use` і
-  `cancel`, а не лише `run`/`resume`.
-- Workspace candidate дозволено досліджувати тільки в disposable synthetic
-  repo без credentials, production data або цінних Git bytes.
-- Не приймати жоден рейтинговий candidate SHA як завершений milestone, доки
-  цей документ явно не позначає його `DONE`.
-- Не починати G2, доки R1-H не має zero BLOCKER/MAJOR exact-SHA verdict.
-- Не починати MilHRMS, доки RC1 не прийнятий owner.
+- Не використовуйте `chat`, `conversations`, `config` або будь-яку `goal`
+  команду на repository, який не можна втратити.
+- Workspace probes запускаються лише в disposable synthetic repository без
+  credentials, production data або цінних Git bytes.
+- `REVISE`, passing tests або isolated V1 acceptance не дорівнюють product
+  acceptance.
+- Не інтегруйте `PARALLEL-HELD` module до acceptance його dependency.
+- Не починайте G2 до integrated R1-H із zero unresolved BLOCKER/MAJOR.
+- Не починайте MilHRMS до owner acceptance повного RC1.
 
-## Словник статусів
+## Що означають statuses
 
-| Status | Значення |
+| Status або verdict | Значення |
 |---|---|
-| `OPEN` | У merge-authorized dependency path немає прийнятого checkpoint. Для складеного `OPEN/PARALLEL-HELD` isolated writer уже може працювати, але accepted candidate ще немає. |
-| `ACTIVE` | Поточна bounded робота в єдиній merge-authorized стадії. |
-| `PARALLEL-HELD` | Ізольований модульний candidate можна розробляти й рецензувати паралельно за frozen interface, але не інтегрувати, не приймати як закриття finding, stage чи milestone і не використовувати як нову базу до acceptance його залежності. |
-| `VERIFY/PARALLEL-HELD` | Held candidate допущено до independent review, але review verdict, owner acceptance і право інтеграції ще відсутні. |
-| `PARTIAL` | Частина outcome закрита прийнятими checkpoints, решта в роботі. |
-| `BLOCKED` | Зовнішня залежність або повторюваний impasse не дає прогресу. |
-| `VERIFY` | Candidate існує; потрібні gates/exact-SHA review. |
-| `DONE` | Acceptance evidence і точний accepted SHA зафіксовані. |
-| `DEFERRED` | Свідомо поза поточним milestone; не прихований defect. |
+| `OPEN` | Робота ще не має candidate. |
+| `ACTIVE` | Це поточна merge-authorized bounded робота. |
+| `REMEDIATION` | Candidate отримав finding; writer готує новий SHA. |
+| `VERIFY` | Candidate committed; потрібні gates та/або independent review. |
+| `REVISE` | Review verdict: candidate не прийнятий і потребує remediation. |
+| `PARALLEL-HELD` | Незалежну lane можна розробляти, але не інтегрувати. |
+| `HELD-ACCEPTED` | Isolated V1 пройшов свій review, але dependency/product gate ще не пройдено. |
+| `DONE` | Required evidence, accepted exact SHA і owner disposition зафіксовані. |
+| `BLOCKED` | Без зовнішнього рішення або зміни стану неможливо рухатись далі. |
+| `DEFERRED` | Свідомо відкладено за roadmap; це не прихований defect. |
 
-Якщо в таблиці зустрічається складений запис на кшталт `PARTIAL/ACTIVE` або
-`VERIFY/ACTIVE`, перше слово описує загальний прогрес outcome, а друге — стан
-поточної bounded роботи. Нові записи бажано розносити на окремі поля; цей
-формат збережено лише там, де він допомагає читати історичний перехід.
+Severity і priority — різні речі:
 
-Priority означає порядок усередині recovery, а не право відкласти finding:
+- `BLOCKER` — defect дозволяє небезпечний effect або руйнує core evidence;
+- `MAJOR` — істотне порушення required contract;
+- Priority 0 (`P0`) — перша черга recovery;
+- Priority 1 (`P1`) — також обов'язково закрити до R1-H.
 
-- `P0` — прямий BLOCKER exploit; закривається першочергово;
-- `P1` — підтверджений MAJOR; також обов'язково закривається до R1-H;
-- жоден із 11 findings не переноситься за межі R1 acceptance.
+## Actionable R1 ledger
 
-## Огляд усіх findings (4 BLOCKER + 7 MAJOR)
+| Lane | Поточний стан | Наступна дія | Exit evidence |
+|---|---|---|---|
+| R1-A / SEC-001 | `REMEDIATION`, merge-authorized | Fable виправляє canonical IDs і managed Git worktree ownership після двох `REVISE` verdicts. | Новий clean SHA; mandatory SEC-001 regressions; full gates; independent review zero BLOCKER/MAJOR. |
+| R1-B1 / secret-safe bounded capture | `REMEDIATION/PARALLEL-HELD`, not accepted | Завершити remediation; повторити isolated review. | Scrub-before-persist, honest bounds і crash probes accepted; чекати R1-A dependency. |
+| R1-C0 / managed-process V1 | `HELD-ACCEPTED` | Не змінювати й не інтегрувати до dependency gate. | На інтеграції повторити contract/process-tree tests на combined SHA. |
+| R1-D0 / monotonic cancellation V1 | `REMEDIATION/PARALLEL-HELD`, not accepted | Закрити review findings; новий SHA та re-review. | Linearizable cancellation і quiescence regressions accepted. |
+| R1-E0 / exact-SHA evidence V1 | `HELD-ACCEPTED` | Тримати isolated; підготувати dependency-safe integration. | Fresh immutable evidence views; mutation invalidates evidence. |
+| R1-F0 / strict review-document V1 | `HELD-ACCEPTED` | Тримати isolated; не трактувати як повну provenance acceptance. | Strict parser/reviewer integration на combined SHA. |
+| R1-G0 / no-progress escalation V1 | `REMEDIATION/PARALLEL-HELD`, not accepted | Закрити findings; новий SHA та re-review. | Repeated same evidence escalates або завершується чесним `BLOCKED`. |
+| R1-H / integrated recovery | `OPEN` | Почати лише після dependency-ordered acceptance R1-A…R1-G. | Один clean integration SHA, consolidated adversarial suite, full gates, independent review zero BLOCKER/MAJOR. |
 
-| ID | Клас | Priority | Стадія | Статус |
-|---|---|---:|---|---|
-| `SEC-001` | BLOCKER — path escape/destructive cleanup | P0 | R1-A | `PARTIAL/ACTIVE` |
-| `SEC-002` | BLOCKER — durable credential/raw output | P0 | R1-B | `OPEN/PARALLEL-HELD` |
-| `RES-001` | MAJOR — unbounded shell capture | P1 | R1-B | `OPEN/PARALLEL-HELD` |
-| `RUN-001` | BLOCKER — spawn/record fencing gap | P0 | R1-C | `OPEN/PARALLEL-HELD` |
-| `RUN-002` | MAJOR — incomplete process-tree termination | P1 | R1-C | `OPEN/PARALLEL-HELD` |
-| `RUN-003` | MAJOR — non-linearizable cancellation | P1 | R1-D | `OPEN` |
-| `EVD-001` | BLOCKER — evidence commands author/forge code | P0 | R1-E | `OPEN` |
-| `EVD-002` | MAJOR — baseline contamination | P1 | R1-E | `OPEN` |
-| `REV-001` | MAJOR — review fail-open | P1 | R1-F | `OPEN/PARALLEL-HELD` |
-| `PROV-001` | MAJOR — contributor provenance gap | P1 | R1-F | `OPEN` |
-| `RTE-001` | MAJOR — escalation reset/no progress | P1 | R1-G | `OPEN` |
+## R1-A / SEC-001 acceptance contract
 
-## Поточне — R1-A (filesystem identity and path safety)
+### Required outcome
 
-Мета R1-A: жоден filesystem-backed ідентифікатор (Goal, Conversation, agent
-run) не повинен дозволяти вихід за межі свого дозволеного root, і жоден
-destructive виклик не повинен виконуватись без доведеної належності цілі.
+- Goal, Conversation та agent-run identifiers мають один canonical validator
+  до будь-якої побудови filesystem path.
+- Absolute, parent (`..`), separator, symlink і identity-mismatch input
+  відхиляється до effect.
+- Agent-run root і leaf I/O прив'язані до доведеної filesystem identity;
+  підміна root або leaf не переносить read/write назовні.
+- Persisted prompt provenance відповідає scrubbed bytes, які parent справді
+  передав child; підміна після spawn не приймається.
+- Process record належить exact Goal/attempt, який його створив.
+- Destructive worktree API виводить target із canonical owner identity, а не
+  приймає довільний caller `Path`.
+- Durable owner record поза target прив'язує exact repository, target, owner,
+  purpose та initial SHA.
+- Unowned, corrupt, mismatched, symlinked або foreign target відхиляється без
+  видалення його bytes чи Git registration.
+- Crash retry має явний ownership state й відновлює тільки exact owned target;
+  silent adoption заборонено.
+- Cleanup використовує лише exact `git worktree remove --force`;
+  `git worktree prune` і `shutil.rmtree` не є fallback.
 
-### Підзадачі R1-A
+### Mandatory deterministic regressions
 
-| Підзадача | Checkpoint SHA | Статус |
+- absolute, `..` і symlink Goal identifiers;
+- absolute, `..` і symlink Conversation identifiers;
+- agent-run root replacement звичайною directory або symlink;
+- leaf/prompt replacement до acceptance;
+- process record із чужим Goal/attempt identity;
+- unowned, corrupt, mismatched і symlinked worktree owner records;
+- manifest із підміненою internal identity;
+- crash/retry на кожному durable ownership transition;
+- valid owned target success і exact cleanup;
+- root, parent і sibling sentinels існують після кожної відмови;
+- Git worktree registration не зникає після fail-closed rejection.
+
+### Gate
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run mypy
+```
+
+Candidate має бути committed і clean. Review називає exact SHA. Будь-який
+unresolved BLOCKER/MAJOR створює новий remediation SHA й повний повтор gate та
+review; старий verdict не переписується.
+
+## Finding ledger: 4 BLOCKER + 7 MAJOR
+
+Prefix пояснює область finding: Security (`SEC`), Resource (`RES`), Runtime
+process (`RUN`), Evidence (`EVD`), Review (`REV`), Provenance (`PROV`) і
+Routing/escalation (`RTE`).
+
+| ID | Severity | Lane | Required result | Стан |
+|---|---|---|---|---|
+| Security 001 (`SEC-001`) | BLOCKER | R1-A | Canonical IDs; path/worktree effects fail closed. | `REMEDIATION` |
+| Security 002 (`SEC-002`) | BLOCKER | R1-B | Жодних durable raw credential bytes. | `REMEDIATION/PARALLEL-HELD` |
+| Resource 001 (`RES-001`) | MAJOR | R1-B | Bounded streaming output із чесним truncation report. | `REMEDIATION/PARALLEL-HELD` |
+| Runtime 001 (`RUN-001`) | BLOCKER | R1-C | Durable process ownership до першого child effect. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
+| Runtime 002 (`RUN-002`) | MAJOR | R1-C | TERM→KILL охоплює process group; record живе до reap/quiescence. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
+| Runtime 003 (`RUN-003`) | MAJOR | R1-D | Cancellation linearizable й monotonic. | `REMEDIATION/PARALLEL-HELD` |
+| Evidence 001 (`EVD-001`) | BLOCKER | R1-E | Acceptance commands не можуть author/forge candidate bytes. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
+| Evidence 002 (`EVD-002`) | MAJOR | R1-E | Кожна evidence command бачить fresh exact-SHA view. | V1 `HELD-ACCEPTED`; finding не закритий до integration. |
+| Review 001 (`REV-001`) | MAJOR | R1-F | Malformed/unknown review ніколи не стає PASS. | V1 `HELD-ACCEPTED`; integration pending. |
+| Provenance 001 (`PROV-001`) | MAJOR | R1-F | Contributor identity durable до effect і bound до commits. | `OPEN`; R1-F0 сам не закриває outcome. |
+| Routing 001 (`RTE-001`) | MAJOR | R1-G | Progress визначається новим evidence, не лише новим SHA. | `REMEDIATION/PARALLEL-HELD` |
+
+## Documentation і owner decisions
+
+| ID | Стан | Outcome |
 |---|---|---|
-| Прив'язати весь leaf I/O run-директорії agent-run до власного dirfd (виключити pathname race) | `288e172…` | `DONE` (checkpoint accepted) |
-| Прив'язати root agent-runs за inode; перевіряти походження prompt перед acceptance | `93fac31…` | `DONE` (checkpoint accepted) |
-| Process-record authority — process-record належить саме тому Goal/attempt, який його створив; root pin перевірено проти ordinary/symlink replacement | `495b5f1…` | `DONE` (762 passed, 1 skipped; exact-SHA review PASS) |
-| **Managed Git worktree ownership** — destructive lifecycle доступний лише через typed owner і durable back-reference | Ще немає candidate | `ACTIVE` (поточна підзадача) |
+| Documentation 002 (`DOC-002`) | `VERIFY` | Readable owner/developer docs; volatile status лише тут; потрібен independent docs review exact candidate SHA. |
+| Owner 001 (`OWN-001`) | `OPEN` | Узгодити repository/package license metadata. |
+| Owner 002 (`OWN-002`) | `OPEN` | Визначити long-term credential reference/store policy. |
+| Owner 003 (`OWN-003`) | `OPEN` | Визначити, коли локальний accepted product chain інтегрується в `main`. |
+| Owner 004 (`OWN-004`) | `OPEN` | Визначити disposition orphan dogfood commit `b4e0d5167a8991f6832348a3f2e581ab63c30acc`. |
 
-### SEC-001 — Canonical IDs та path containment
+Ці owner decisions не дають workspace-командам обхід stop gate.
 
-**Evidence:** Goal/Conversation identifiers потрапляють у path construction
-без єдиної validation. `fresh_worktree()` виконував destructive cleanup перед
-resolved-descendant/symlink containment. Probe передав absolute Goal name і
-видалив pre-existing sentinel поза `.dagvane`. Окремо: agent-runs root був
-canonical лише в момент побудови, а run-директорія створювалась by pathname
-mkdir — root, підмінений symlink чи звичайною директорією після конструктора,
-міг вивести створення й усі артефакти поза довіреним root; а звичайний child
-процес міг підмінити `prompt.md` до виходу, і runner публікував підмінений
-prompt як provenance.
+## Як оновлювати цей файл
 
-**Що вже закрито (`288e172…`, `93fac31…`):**
-
-- run-директорія agent-run відкривається `O_DIRECTORY|O_NOFOLLOW`, ідентичність
-  root доводиться через `(device, inode)`, зафіксовані на конструкторі;
-  створення й pinning виконуються строго відносно dirfd, без pathname mkdir;
-  ідентичність root і run path повторно доводиться і після mkdir, і перед
-  success;
-- точні scrubbed prompt bytes зберігаються в пам'яті батьківського процесу;
-  після reap child і до acceptance листовий файл prompt перечитується
-  `O_NOFOLLOW|O_NONBLOCK` відносно pinned run-dir fd, підтверджується як
-  regular file і звіряється байт-у-байт; будь-яке відхилення атомарно
-  відновлює оригінальний scrubbed prompt через pinned dirfd і піднімає
-  `StorageError`; symlink-ціль поза root ніколи не відкривається.
-
-**Що залишається (managed Git worktree ownership, `ACTIVE`):**
-
-- destructive worktree API не приймає довільний caller `Path`, а виводить
-  exact target із canonical Goal/run/purpose identity;
-- durable owner record поза target прив'язує exact repo, target, owner,
-  purpose і initial SHA до destructive lifecycle;
-- unowned, corrupt, mismatched, symlinked або чужий target ніколи не
-  приймається й не видаляється; усі sentinels і Git registrations зберігаються;
-- crash retry має явні стани ownership і відновлює тільки exact owned target;
-- cleanup використовує лише exact `git worktree remove --force`; заборонені
-  `shutil.rmtree`, repo-wide `git worktree prune` і silent adoption.
-
-**Regression evidence:** absolute/`../`/symlink Goal і Conversation probes;
-root/parent/sibling sentinel завжди існує після відмови; manifest із
-підміненою internal identity відхиляється; валідний owned target працює.
-
-**Наступний крок:** bounded candidate для manager core + baseline migration →
-focused gates → exact-SHA review; окремим checkpoint — міграція
-writer/verify/review і вилучення unsafe helpers. Після consolidated SEC-001
-adversarial PASS R1-A переходить у `DONE`.
-
-## Наступне — R1-B (secret boundary та bounded output)
-
-Розблоковується одразу після acceptance R1-A. Закриває `SEC-002` і
-`RES-001` як один streaming/persistence boundary.
-
-### SEC-002 — No durable raw/credential bytes
-
-**Evidence:** subprocess runner створював `agent-runs/<id>/output.raw`; scrub
-і unlink виконувались лише після pump. Forced parent crash лишив файл із
-synthetic registered secret. Initial `chat` message і title також записувались
-до shared sanitizer/registration boundary.
-
-**Required outcome:**
-
-- no durable raw-output path;
-- bounded streaming scrub відбувається до persistence і до truncation;
-- values із selected resource реєструються scrubber **до першого durable
-  byte** initial message/title і до першого child byte;
-- initial user message/title проходить ту саму persistence boundary;
-- recovery cleanup не покладається лише на normal `finally`.
-
-**Regression evidence:** scan усіх bytes під `.dagvane` під час run, після
-success, timeout, cancel і SIGKILL parent; synthetic secret не знайдений;
-scrubber variants/edge chunks покриті; sanitized history, передана іншому або
-наступному resource, також не містить credential.
-
-**Dependency:** координація з RES-001, щоб bounds не обрізали secret раніше
-за scrubber.
-
-### RES-001 — Bounded process output
-
-**Evidence:** `run_shell().communicate()` накопичує повний stdout/stderr у RAM
-до truncation. Untrusted/buggy verify command може спричинити OOM.
-
-**Required outcome:** streaming або bounded spool із явними memory/file/output
-ceilings; terminal result чесно позначає truncation; timeout/cancel не читає
-нескінченний pipe після завершення ownership.
-
-**Regression evidence:** deterministic large/infinite output fake; peak
-capture не перевищує bound; process terminated/reaped; result/log bounded і
-scrubbed.
-
-## Пізніше — R1-C…R1-H (стисло)
-
-Повна деталізація розкривається лише коли ці стадії стають поточними —
-дивіться правила оновлення нижче. Мапінг finding → outcome зберігається тут,
-щоб жоден defect не загубився.
-
-| Стадія | Findings | Що має довести acceptance |
-|---|---|---|
-| R1-C — Process ownership і termination | `RUN-001`, `RUN-002` | Child не діє до durable attempt/process identity; TERM→KILL охоплює всю process-group незалежно від leader lifecycle; record живе до доведеної quiescence. |
-| R1-D — Monotonic cancellation | `RUN-003` | Versioned compare-and-swap state transitions; cancel охоплює baseline/agent/checks/verify/review/commit; quiescence доводиться до terminal `CANCELLED`, інакше explicit failed/blocked, не silent success. |
-| R1-E — Exact-SHA command і baseline evidence | `EVD-001`, `EVD-002` | Evidence/acceptance команди не можуть додавати candidate bytes; кожна команда бачить fresh disposable exact-SHA view; moved HEAD/tracked mutation одразу invalidates evidence. |
-| R1-F — Review integrity і contributor provenance | `REV-001`, `PROV-001` | Reviewer працює на pinned clean checkout; malformed/unknown finding — infrastructure failure, не PASS; contributor set durable й bound до commits, навіть після crash. |
-| R1-G — Lack-of-progress escalation | `RTE-001` | Progress визначається новим evidence, не новим SHA; repeated identical BLOCKER ескалює до STRONG/CRITICAL або дає terminal `BLOCKED`. |
-| R1-H — Integrated recovery acceptance | усі 11 | Один clean integration SHA; consolidated adversarial suite + standard gates green; independent review zero BLOCKER/MAJOR. |
-
-Після R1-H наступні capability groups (G2 context ownership, G3 secure
-implementation worker, G4 orchestration/self-development, G5 IPC/Qt GUI, RC1,
-MilHRMS) деталізуються в цьому файлі лише коли вони стають активною стадією.
-Стисла назва й порядок стадій — у
-[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
-
-## Документаційний ремедіаційний ticket
-
-| ID | Priority | Status | Outcome |
-|---|---:|---|---|
-| `DOC-002` | P0 | `VERIFY` | Замінити active docs на readable-first канон: одна змінна status-картка в TODO, стабільні README/PLAN/ARCHITECTURE/MODULES/GUI без volatile SHA, новий `GLOSSARY.md`. |
-
-`DOC-002` очікує independent Codex docs review. До acceptance цей запис не
-переходить у `DONE`; exact SHA буде додано після commit і review disposition.
-
-## Відкриті owner decisions
-
-Ці питання не блокують R1, але потребують окремого рішення до release:
-
-| ID | Decision | Status |
-|---|---|---|
-| `OWN-001` | Узгоджена repository/package license metadata. | `OPEN` |
-| `OWN-002` | Long-term credential store/reference policy. | `OPEN` |
-| `OWN-003` | Коли і як локальний accepted main замінює remote baseline. | `OPEN` |
-| `OWN-004` | Disposition orphan dogfood commit `b4e0d516…`. | `OPEN` |
-
-## Правила оновлення TODO
-
-- Один ticket описує outcome, не список бажаних edits.
-- `DONE` містить accepted exact SHA та verification/review evidence.
-- New finding отримує source SHA, severity, reproducible evidence і
+- Один рядок ledger описує outcome, а не список довільних edits.
+- `DONE` завжди містить exact accepted SHA та verification/review evidence.
+- Новий finding отримує source SHA, severity, deterministic reproduction і
   disposition.
-- BLOCKER/MAJOR не зникає: remediation створює новий candidate і новий review;
-  відхилений candidate залишається в history цього finding, а не видаляється.
-- Test count і suite status оновлюються тільки тут, тільки після повного
-  gate.
-- Майбутні стадії не деталізуються передчасно: controller розкриває наступний
-  bounded stage після acceptance поточного, і саме тоді ця секція
-  розширюється в TODO.
+- BLOCKER/MAJOR не видаляється: remediation створює новий candidate; старий
+  verdict лишається в history.
+- Test counts записуються тут лише після full gate на exact SHA.
+- Інші active docs посилаються сюди й не копіюють volatile SHA, counts або
+  candidate verdicts.
+- Майбутня фаза деталізується тільки безпосередньо перед implementation.

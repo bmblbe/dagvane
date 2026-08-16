@@ -1,211 +1,178 @@
-# Глосарій
+# Глосарій Dagvane
 
-Пояснення кожної абревіатури й спеціального терміна, вжитого в active docs,
-простою мовою — при першій появі терміна в документі та тут. Канонічні назви
-коду (наприклад, `ChatBackend`) зберігаються без перекладу, бо саме так вони
-називаються в джерелах.
+Тут технічні слова з active docs пояснені простою мовою. Канонічні назви
+Python types, наприклад `ChatBackend`, не перекладаються, щоб їх легко було
+знайти в source.
 
-## Загальні скорочення
+## Інтерфейси та компоненти
 
-- **ADR** (Architecture Decision Record) — короткий документ, що фіксує одне
-  архітектурне рішення й чому воно прийняте. Лежить у
-  `docs/architecture/decisions/`. Це не план на майбутнє й не чернетка — ADR
-  не переписується заднім числом; нове рішення отримує новий ADR.
-- **API** (Application Programming Interface) — інтерфейс, через який одна
-  програма викликає можливості іншої (наприклад, provider API моделі).
-- **CAS: content-addressed storage** — сховище, де ім'я/адреса файла — це
-  хеш (SHA-256) його вмісту. Це не те саме, що звичайна файлова система з
-  довільними іменами: два байт-в-байт однакові файли завжди мають ту саму
-  адресу.
-- **CAS: compare-and-swap** — умовне оновлення стану: запис виконується лише
-  якщо поточна версія досі дорівнює очікуваній. Це захищає від втрати
-  паралельного оновлення. У документації завжди пишемо повну назву, коли
-  йдеться про цей CAS, а не про content-addressed storage.
-- **CLI** (command-line interface) — інтерфейс командного рядка; спосіб
-  керувати Dagvane через термінал (`dagvane ...`).
-- **GUI** (graphical user interface) — графічний desktop-інтерфейс. У
-  Dagvane це майбутній тонкий Qt-клієнт; це не рушій і не містить
-  бізнес-логіки.
-- **IPC** (inter-process communication) — обмін повідомленнями між двома
-  окремими процесами (наприклад, майбутній GUI-процес і Python engine
-  процес). Це не мережевий протокол до зовнішнього сервера.
-- **E-IPC** — майбутній набір негативних і stress-тестів, який має довести
-  властивості стабільного IPC до фіксації GUI-протоколу. Це назва evidence
-  gate, а не вже реалізована команда чи компонент.
-- **E-AGENT** — майбутній admission-test для зовнішнього coding agent:
-  перевірка версії, structured output, cwd, bounds, cancellation, containment
-  і чесного usage. До проходження цього gate ExternalAgent не вважається
-  безпечним implementation worker.
-- **NDJSON** (newline-delimited JSON) — формат, де кожен рядок — окремий
-  валідний JSON-об'єкт. Використовується для event-стріму Council. Це не те
-  саме, що JSONL — терміни для наших цілей взаємозамінні, але офіційна назва
-  формату Dagvane events саме NDJSON.
-- **JSONL** — те саме, що NDJSON: JSON Lines, один JSON-запис на рядок.
-- **POSIX** — стандарт поведінки Unix-подібних систем (Linux, macOS тощо).
-  "POSIX-only" означає, що функціонал покладається на конкретні гарантії цих
-  систем (наприклад, `flock`) і не працює так само на інших платформах.
-- **PID** (process ID) — числовий ідентифікатор одного процесу в
-  операційній системі. PID можна перевикористати після завершення процесу —
-  тому сам по собі PID не є надійним доказом "це той самий процес".
-- **PGID** (process group ID) — ідентифікатор групи процесів; дозволяє
-  надіслати сигнал (наприклад, завершення) одразу всім процесам групи, а не
-  лише одному.
-- **TERM/KILL** — два сигнали операційної системи для завершення процесу.
-  `TERM` — "будь ласка, завершись коректно"; процес може це проігнорувати.
-  `KILL` — безумовне примусове завершення, яке процес проігнорувати не може.
-  Правильна послідовність: спершу `TERM`, дати час, потім `KILL`, якщо
-  процес не відповів.
-- **NFS** (Network File System) — мережева файлова система. У контексті
-  Dagvane важливо, що файлові блокування (`flock`) на NFS **не є** надійною
-  гарантією взаємного виключення — тому NFS не вважається безпечною межею
-  для Goal lease.
-- **SHA / exact-SHA** — SHA — криптографічний хеш; тут майже завжди йдеться
-  про Git SHA — унікальний ідентифікатор конкретного коміту. "exact-SHA"
-  наголошує, що йдеться про **точний**, конкретний коміт, а не про назву
-  гілки (яка може рухатись). Review, gate і acceptance завжди прив'язані до
-  exact-SHA, ніколи до "поточного стану гілки".
-- **RC1** (Release Candidate 1) — перший кандидат на повний local release:
-  CLI, engine, IPC і Qt GUI разом, з усіма gates і review без BLOCKER/MAJOR.
-  Це не проміжний headless-реліз — RC1 йде після Qt, не до нього.
-- **SDK** (Software Development Kit) — бібліотека постачальника (наприклад,
-  `anthropic`), яку Dagvane використовує лише в опційних, "лениво"
-  імпортованих адаптерах, ніколи в domain-коді.
-- **TOML** — текстовий формат конфігурації, який використовується для live
-  profiles й `.dagvane/config.toml`.
+- **CLI (command-line interface)** — керування програмою з термінала через
+  `dagvane ...`. Сьогодні це єдиний реалізований user interface.
+- **GUI (graphical user interface)** — графічний desktop client. У Dagvane
+  це запланований C++20/Qt 6 thin client; Qt implementation ще немає.
+- **IPC (inter-process communication)** — versioned messages між окремими
+  процесами Python engine і майбутнього GUI. Поточний Council event stream не
+  є таким command/result protocol.
+- **API (application programming interface)** — спосіб, у який один component
+  викликає інший component або external service.
+- **Port** — вузький contract, якого application потребує від зовнішнього
+  світу: methods, values, errors і effects. Port не знає конкретного vendor.
+- **Adapter** — implementation port через конкретний provider, filesystem,
+  subprocess або Git.
+- **Composition root** — місце, де interface вибирає concrete adapters і
+  збирає application. Поточний root живе в CLI.
+- **Domain** — правила та values задачі без filesystem, network, process чи
+  provider details.
+- **Application** — orchestration і policy: який крок виконати та як
+  трактувати result.
+- **Protocol document** — strict JSON, TOML або NDJSON shape на system
+  boundary. Invalid document відхиляється до effect.
+- **SDK (software development kit)** — бібліотека vendor. Provider SDK у
+  Dagvane є optional і імпортується тільки всередині adapter.
 
-## Стадії й статуси
+## Git, evidence і acceptance
 
-- **G0–G5** — великі capability-стадії плану релізу: G0 фундамент Council
-  (детермінований), G1 живий multi-provider Council, G2 context/Goal
-  ownership, G3 secure implementation worker, G4 orchestration/
-  self-development, G5 IPC/Qt GUI. Повний перелік — у
-  [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
-- **R1** — окрема відновлювальна стадія "безпечний Autonomous Developer" між
-  G1 і G2 (стадія 2 плану), а не частина G-послідовності.
-- **R1-A…R1-H** — сім малих code sprints і одна інтеграційна acceptance
-  всередині стадії 2 (R1), кожен закриває конкретний набір findings.
-  Детально — у [`TODO.md`](TODO.md).
-- **candidate** — код чи коміт, який ще не прийнятий: він існує й може навіть
-  проходити тести, але не пройшов independent exact-SHA review без
-  BLOCKER/MAJOR. Candidate SHA **не є** тим самим, що repository HEAD — він
-  стає частиною HEAD лише після owner integration.
-- **`PARALLEL-HELD`** — статус ізольованої модульної роботи, яку дозволено
-  виконувати й рецензувати паралельно за замороженим interface contract, але
-  ще заборонено інтегрувати або зараховувати як закриття finding. Held-кандидат
-  чекає acceptance своєї dependency й тільки тоді може стати merge-authorized.
-  Він збільшує throughput, але не закриває finding, stage або milestone.
-- **acceptance gate** — точка, де незалежний review і власник підтверджують,
-  що конкретний exact SHA задовольняє всі required outcomes стадії. До
-  проходження gate — це не готова функціональність, навіть якщо код вже
-  написаний.
-- **fail-closed** — принцип: якщо перевірка неможлива або результат
-  сумнівний, система відмовляє (не виконує дію), а не намагається
-  "оптимістично" продовжити. Протилежність — fail-open, коли невизначеність
-  трактується як дозвіл; саме fail-open і був одним із знайдених дефектів
-  review (`REV-001`).
+- **SHA / exact SHA** — Git commit identifier. Branch name може рухатися, а
+  exact SHA називає один конкретний immutable commit. Tests, review і
+  acceptance мають посилатися саме на exact SHA.
+- **Candidate** — commit, який підготовлено для перевірки, але ще не прийнято.
+  Passing tests самі по собі не роблять його accepted.
+- **Accepted SHA** — exact commit, для якого required gates, independent
+  review і потрібна owner disposition завершені у визначеному scope.
+- **Worktree** — окремий checkout одного Git repository зі своїми working
+  files та index. Він зручний для isolated writer, але не є sandbox.
+- **Sandbox** — OS-level обмеження filesystem, process, network і resources.
+  Worktree не дає цих гарантій. Поточний Workspace runner ще не має accepted
+  sandbox для model-modified code.
+- **Containment** — доказ, що effect не виходить за дозволену boundary.
+  Filesystem, process і network containment — окремі задачі.
+- **Canonical identifier** — одна дозволена, однозначна форма ID. Його
+  перевіряють до побудови path, щоб absolute path, `..`, separator або інша
+  двозначність не змінили target.
+- **Fail-closed** — якщо permission, identity чи state не можна довести,
+  система відмовляє до effect. **Fail-open** робить протилежне й небезпечне:
+  трактує невизначеність як дозвіл.
+- **Provenance** — доказ, звідки взялися input, output або commit і хто їх
+  створив.
+- **Evidence** — tests, logs, artifacts, exact SHA та review records, які
+  доводять outcome. Твердження writer без незалежної перевірки не є evidence.
+- **Acceptance gate** — точка, де весь required evidence перевірено для exact
+  candidate. Owner integration є окремим рішенням.
+- **BLOCKER / MAJOR / MINOR** — рівні review finding. BLOCKER і MAJOR
+  обов'язково створюють remediation на новому SHA до acceptance; MINOR отримує
+  explicit disposition.
 
-## Стан і дані
+## Паралельна розробка
 
-- **durable state** — стан, який переживає перезапуск процесу чи падіння,
-  бо він записаний на диск певним, перевіреним чином (не просто "лежить у
-  пам'яті").
-- **journal** — послідовний, append-only (лише дописуваний, ніколи не
-  переписуваний) запис усіх подій одного run. Це джерело правди; звітні
-  файли (`report.json`, `decision.json`) — лише похідні від journal
-  представлення.
-- **replay** — відтворення стану run шляхом послідовного читання journal і
-  перевірки, що кожен перехід валідний. Replay **не є** "продовженням
-  виконання" — це лише реконструкція того, що вже сталося, для перевірки й
-  діагностики.
-- **artifact** — окремий файл, породжений run (запит до моделі, відповідь,
-  тощо), збережений у content-addressed сховищі (CAS) і на який journal
-  посилається за хешем.
-- **Git worktree** — окрема робоча директорія Git-репозиторію, прив'язана до
-  того самого `.git`, але з власним checkout файлів. Це **не** sandbox: вона
-  ізолює лише файли checkout, а не процеси, мережу чи решту файлової
-  системи — дивись "sandbox" нижче.
-- **sandbox** — механізм ізоляції виконання (обмеження процесів, мережі,
-  файлової системи), окремий від Git worktree. У Dagvane sandbox для
-  згенерованого коду поки не реалізований. Політика `trusted-project` з
-  явним owner-дозволом — це **майбутня політика стадії G3**, а не чинний
-  обхід. Сьогодні жоден owner grant не скасовує stop gate R1-H: workspace-
-  команди й generated-code execution заборонені на реальних або цінних
-  репозиторіях.
-- **containment** — загальний термін для "утримання" ефекту дії в дозволених
-  межах: шляхів файлової системи, процесів, мережі. Path containment,
-  process containment тощо — різні конкретні прояви цього принципу.
+- **Bounded task** — одна мала задача з exact input, expected output, tests,
+  non-goals і лімітом роботи.
+- **Writer** — єдина роль, якій дозволено змінювати конкретний candidate
+  worktree. Два writers не працюють в одному mutable checkout.
+- **Independent review** — перевірка committed exact SHA моделлю або людиною,
+  яка не була writer цього candidate.
+- **Judge** — роль, що зіставляє findings із frozen contract і дає
+  disposition. Judge не виконує merge.
+- **Remediation** — виправлення BLOCKER/MAJOR у новому candidate commit із
+  повторними gates і review.
+- **V1 / V2** — версії interface. V1 — найменший корисний frozen contract.
+  Несумісна зміна стає V2; semantics V1 не змінюються мовчки.
+- **Contract test** — один набір tests, який перевіряє кожну implementation
+  port, включно з errors та edge cases.
+- **Merge-authorized** — єдина dependency-ordered lane, яку після acceptance
+  можна запропонувати власнику для integration.
+- **PARALLEL-HELD** — independent module lane можна розробляти й review-ити,
+  але не можна інтегрувати або зараховувати як завершення product finding,
+  доки не прийнята її dependency.
+- **Integrator** — окремий writer, який з'єднує accepted module SHAs через
+  малий adapter.
+- **Glue layer** — невелике перетворення між двома accepted interfaces. Воно
+  не повинно приховувати contract violation або містити business logic.
 
-## Ролі й компоненти системи
+## State і recovery
 
-- **port / interface contract** — вузька домовленість про те, які методи,
-  типи даних, помилки й effects модуль надає назовні. Інші модулі залежать від
-  контракту, а не від внутрішньої реалізації.
-- **versioned V1 contract** — найменший корисний frozen contract для поточного
-  bounded slice, а не спроба передбачити повний future API. Сумісне доповнення
-  можна оголосити як capability/minor revision, якщо старі consumers лишаються
-  валідними. Несумісна зміна потребує explicit `V2` і явного migration path;
-  поведінку `V1` не змінюють мовчки. In-process port має публічну version
-  constant і contract tests; durable або wire document має поле
-  `schema_version`.
-- **contract test** — тест, який однаково запускається проти реалізацій одного
-  port і доводить їхню сумісність. Це не лише happy-path unit test.
-- **writer** — агент, який має право змінювати один isolated candidate
-  worktree. Кожен candidate має рівно одного writer; alternative writers
-  створюють окремі candidates. Writer не рецензує власний candidate.
-- **independent model review** — review committed candidate зі fresh context
-  моделлю, яка не була його writer. Кожен isolated candidate проходить
-  щонайменше два такі reviews до judge disposition.
-- **judge** — незалежна роль, яка зіставляє review findings із frozen
-  contract, класифікує їх і вирішує PASS або remediation. Judge не означає
-  автоматичний merge.
-- **remediation loop** — цикл, у якому BLOCKER/MAJOR виправляється в новому
-  candidate SHA, після чого зміна знову проходить independent review і judge.
-- **integrator** — окремий writer, який бере вже прийняті module SHAs і
-  з'єднує їх через integration seam. Він не переписує module interface чи
-  внутрішності: потрібну interface-зміну повертає власнику модуля як окрему
-  bounded capability/`V2` задачу з власним review/judge.
-- **glue layer** — малий adapter між двома сумісними, але різними
-  інтерфейсами. Glue перетворює форму виклику/даних, але не дублює business
-  logic і не приховує порушення contract.
+- **Durable state** — state, записаний так, щоб пережити process restart або
+  crash.
+- **Journal** — append-only послідовність events. Для Council це canonical
+  history; report є derived view.
+- **Replay** — читання journal для перевірки й reconstruction уже записаного
+  state. Replay не означає продовження interrupted execution.
+- **Artifact** — окремий run output, збережений і названий hash його bytes.
+- **Content-addressed storage** — storage, де address дорівнює content hash;
+  однакові bytes мають однаковий address.
+- **Compare-and-swap** — conditional state update: write відбувається лише
+  якщо current version дорівнює очікуваній. Не плутати з
+  content-addressed storage, яке інколи теж скорочують як CAS.
+- **Idempotent operation** — safe retry не створює другого effect і не змінює
+  вже правильний result.
+- **Fencing** — durable identity/version, яка не дозволяє старому worker
+  продовжити effects після втрати ownership.
+- **Quiescence** — доведений стан, у якому process tree більше не може
+  виконувати effects.
 
-- **Council** — фіксований (`council-v1`) або майбутній повний workflow, де
-  кілька моделей незалежно пропонують рішення, сліпо рецензують одна одну,
-  а потім суддя (judge) формує фінальне рішення. Це основний прийнятий і
-  безпечний шлях сьогодні.
-- **ExternalAgent** — зовнішній автономний coding CLI-процес (наприклад,
-  Codex, Claude Code, `agy`), який Dagvane може запускати як subprocess. Це
-  **не те саме**, що `ChatBackend`: ExternalAgent має власний робочий
-  каталог, інструменти й lifecycle процесу, а не просто повертає одну
-  відповідь.
-- **ChatBackend** — контракт для одноразового ("one-shot") виклику моделі:
-  запит → відповідь. Це **не** autonomous coding CLI і не має власного
-  process lifecycle — саме таку роль виконують `ExternalAgent`.
-- **ToolBroker** — запланований (ще не реалізований) компонент, який видає
-  моделі/агенту дозволи на конкретні дії (читання, патч, запуск тестів)
-  через явну policy `DENY`/`ASK`/`ALLOW`, замість необмеженого доступу.
-- **ContextSnapshot** — точний, зафіксований опис того, що саме "бачила"
-  модель під час конкретного виклику: джерельний SHA, роль, route,
-  інструкції, фрагменти розмови й workspace, бюджет. Дає відповідь на
-  питання "чому модель відповіла саме так" пост-фактум.
-- **provider session** — опційне збереження стану розмови на боці
-  постачальника моделі (native session). Dagvane трактує це лише як
-  необов'язкову оптимізацію continuity, а не як джерело істини — канонічну
-  історію розмови завжди володіє сам Dagvane.
-- **reconstruct** — політика відновлення розмови/контексту з власного
-  durable стану Dagvane, коли зовнішня provider session втрачена, замість
-  того щоб просто почати "з нуля" без історії.
-- **route / resource tier** — `route` — конкретна прив'язка
-  provider+model+ліміти+ціна+policy. `resource tier` (наприклад, `LOCAL`,
-  `CHEAP`, `STANDARD`, `STRONG`, `CRITICAL`) — категорія "наскільки потужний
-  і дорогий ресурс потрібен для цієї задачі", vendor-neutral, окремо від
-  конкретної моделі.
-- **MilHRMS** — окремий проєкт (система управління персоналом), який
-  Dagvane планує розробляти як demo-задачу, але лише **після** повного
-  owner acceptance RC1 — не раніше і не паралельно.
+## Model і context
 
-## Де дивитись деталі
+- **Model** — inference capability, наприклад конкретна model name.
+- **Provider / connection** — endpoint, authentication reference і transport
+  behavior.
+- **Route** — connection + model + limits + price snapshot + policy.
+- **Resource tier** — vendor-neutral рівень вартості/сили, наприклад `LOCAL`,
+  `CHEAP`, `STANDARD`, `STRONG` або `CRITICAL`.
+- **ChatBackend** — one-shot model call: request → result. Він не має coding
+  tools або process lifecycle.
+- **ExternalAgent** — autonomous coding CLI process із cwd, tools, session і
+  lifecycle. Це не `ChatBackend`.
+- **Council** — workflow із незалежними proposals, blind reviews і judge.
+  `council-v1` є fixed accepted Council; майбутній full Council буде окремою
+  versioned workflow.
+- **LogicalConversation** — canonical conversation history, якою володіє
+  Dagvane.
+- **ProviderSession** — optional continuity handle на боці provider; не
+  canonical history.
+- **ContextSnapshot** — exact record того, що model бачила: source SHA, role,
+  route, instructions, conversation/workspace fragments, memory і budget.
+- **fresh / resume / reconstruct** — відповідно новий external context,
+  дозволений reuse provider session або відбудова з Dagvane-owned state.
+- **ToolBroker** — запланований component для explicit `DENY`, `ASK`, `ALLOW`
+  permissions на tools та effects.
 
-Цей глосарій пояснює терміни, не історію рішень. Обґрунтування конкретних
-architectural trade-off — у [`ARCHITECTURE.md`](ARCHITECTURE.md) і
-[`architecture/decisions/`](architecture/decisions/); поточний статус і exact
-SHA — виключно у [`TODO.md`](TODO.md).
+## Formats, processes і платформа
+
+- **JSON** — один structured JavaScript Object Notation document.
+- **NDJSON / JSONL** — один JSON object на кожному рядку. Council events мають
+  canonical NDJSON encoding.
+- **TOML** — configuration format для live profiles і Workspace config.
+- **POSIX** — Unix-like platform contract. Поточний Goal lease використовує
+  POSIX `flock`.
+- **NFS (Network File System)** — network filesystem; `flock` на ньому не є
+  надійною ownership boundary для Goal runner.
+- **PID (process identifier)** — число одного process; після exit може бути
+  перевикористане, тому одного PID недостатньо як proof of identity.
+- **PGID (process-group identifier)** — ID групи processes для group-wide
+  signalling.
+- **TERM → KILL** — спочатку cooperative termination, потім forced kill, якщо
+  processes не завершилися. Після сигналів ще потрібен reap/quiescence proof.
+
+## Фази й tickets
+
+- **D0** — roadmap label accepted Council foundation, який об'єднує
+  deterministic G0 і live G1.
+- **R1** — recovery stage для Workspace Autonomous Developer між Council
+  foundation і G2.
+- **R1-A…R1-H** — bounded recovery outcomes: filesystem, secrets, processes,
+  cancellation, evidence, review, escalation та integrated acceptance.
+- **G2** — durable context, conversations і Goals.
+- **G3** — secure implementation worker, ToolBroker і sandbox.
+- **G4** — validated orchestration та self-development.
+- **G5** — stable engine IPC, потім C++20/Qt 6 GUI.
+- **RC1 (Release Candidate 1)** — один повний candidate із CLI, engine, IPC і
+  Qt GUI, який проходить release acceptance.
+- **SEC / RES / RUN / EVD / REV / PROV / RTE** — prefixes findings для
+  security, resources, process runtime, evidence, review, provenance та
+  routing/escalation.
+- **DOC / OWN** — documentation ticket та owner decision.
+- **MilHRMS** — окремий human-resources product, який планується розробляти
+  через Dagvane лише після owner acceptance повного RC1.
+
+Обґрунтування — у [`ARCHITECTURE.md`](ARCHITECTURE.md), порядок фаз — у
+[`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), а current exact SHA/status —
+тільки в [`TODO.md`](TODO.md).

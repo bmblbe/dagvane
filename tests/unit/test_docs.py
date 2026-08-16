@@ -153,7 +153,7 @@ def test_live_dashboard_structure_and_stop_gate_are_explicit() -> None:
         dashboard,
     )
     assert "не має product acceptance" in dashboard
-    assert "accepted лише в isolated module scope" in dashboard
+    assert "Integrated R1 recovery" in dashboard
     assert "## Що означають statuses" in todo
     assert "## Actionable R1 ledger" in todo
     for lane in (
@@ -195,7 +195,7 @@ def test_development_plan_is_one_linear_owner_decided_route() -> None:
     roadmap = plan[plan.index("## Карта одним рядком") : plan.index("## Як переходити")]
     positions = [roadmap.index(phase) for phase in phases]
     assert positions == sorted(positions)
-    assert "МИ ТУТ: R1 recovery, merge-authorized R1-A" in plan
+    assert "МИ ТУТ: R1 recovery, merge-authorized PROV-001 → R1-H closure" in plan
     assert "RC1 включає" in plan
     assert "C++20/Qt 6 GUI" in plan
     assert "MilHRMS" in plan

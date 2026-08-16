@@ -54,11 +54,13 @@ probes.
 
 ---
 
-## МИ ТУТ: R1 recovery, merge-authorized R1-A
+## МИ ТУТ: R1 recovery, merge-authorized PROV-001 → R1-H closure
 
 R1 відновлює неприйнятий Workspace Autonomous Developer після security і
-durability review. Merge-authorized напрям зараз — R1-A: canonical
-filesystem-backed identifiers і fail-closed path/worktree containment.
+durability review. R1-A (SEC-001) прийнято й інтегровано разом із held
+endpoints R1-B1…R1-G0; закрито 10 з 11 findings. Merge-authorized напрям
+зараз — останній unresolved finding PROV-001 (durable contributor provenance,
+bound до commits), після якого R1-H оголошується повністю завершеним.
 
 Цей напис показує поточну фазу плану, але не є status ledger. Який candidate
 активний, які verdict отримані та які held lanes вже reviewed, дивіться у

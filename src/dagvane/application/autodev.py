@@ -1027,6 +1027,12 @@ class GoalRunner:
             return
 
         if not enforce_unattributed:
+            # Cancellation reconciliation deliberately skips fail-closed
+            # attribution: a CANCELLED run is terminal, never reviewed or
+            # accepted; a later start() creates a fresh RunState/run_id/worktree,
+            # so this dangling candidate_sha cannot reach an accepted candidate.
+            # Failing closed here would instead risk permanently wedging an
+            # operator's cancellation cleanup.
             if head != attempt_base_sha or state.candidate_sha != use.sha:
                 state.candidate_sha = use.sha
                 state.tested_sha = None

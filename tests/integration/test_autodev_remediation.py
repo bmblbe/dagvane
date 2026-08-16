@@ -655,6 +655,59 @@ def test_cancelled_goal_with_running_state_reconciles(tmp_path: Path) -> None:
     assert _run_state(comp, "crash-cancel")["status"] == "cancelled"
 
 
+def test_cancelled_reconciliation_accepts_unattributed_head_advance_without_phantom_contributor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    _init_repo(root)
+    _write_config(root, resources={}, goal={"review_policy": "never"})
+    comp = Composition(root)
+    record = _approved_goal(
+        comp, "cancelled-unattributed", checks=[("marker", "test -f marker.txt")]
+    )
+    runner = _goal_runner(comp)
+    state = RunState(
+        run_id="goalrun-cancelled-unattributed",
+        goal_name="cancelled-unattributed",
+        base_sha=record.contract.base_sha,
+        status="running",
+        started_ts=comp.clock.now_iso(),
+    )
+    atomic_write_json(
+        comp.goals.goal_dir("cancelled-unattributed") / "run-state.json",
+        state.to_doc(),
+    )
+    record.status = GoalStatus.CANCELLED
+    comp.goals.save("cancelled-unattributed", record)
+
+    candidate = runner._open_candidate_worktree(record, state)
+    assert candidate is not None
+    try:
+        token = candidate.lifecycle.begin_sha_advance(
+            candidate.handle, expected_old_sha=candidate.sha
+        )
+        (candidate.path / "marker.txt").write_text("unattributed\n", encoding="utf-8")
+        with runner._pinned_git_authority(candidate.handle) as _identity:
+            committed = GitOps.commit_all(candidate.path, "unattributed advance")
+            assert committed is not None
+            advanced_sha = GitOps.head_sha(candidate.path)
+        candidate.lifecycle.complete_sha_advance(
+            candidate.handle, token, new_sha=advanced_sha
+        )
+    finally:
+        runner._close_candidate_worktree()
+
+    before_resume = _run_state(comp, "cancelled-unattributed")
+    assert before_resume["pending_writer_resource_id"] is None
+    assert before_resume["contributor_resource_ids"] == []
+
+    assert runner.resume("cancelled-unattributed") is GoalStatus.CANCELLED
+    reconciled = _run_state(comp, "cancelled-unattributed")
+    assert reconciled["status"] == "cancelled"
+    assert reconciled["candidate_sha"] == advanced_sha
+    assert reconciled["contributor_resource_ids"] == []
+
+
 # -- 8. one-writer lease under concurrency -----------------------------------
 
 
@@ -1012,6 +1065,35 @@ def test_pending_writer_is_durable_before_commit_state_and_excluded_on_resume(
     assert state["reviews"][-1]["resource"] == "fake-reviewer"
     assert state["reviews"][-1]["valid"] is True
     assert state["candidate_sha"] != record.contract.base_sha
+
+
+def test_pending_writer_persisted_before_invoke_agent_produces_bytes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    _init_repo(root)
+    writer = _agent_script(tmp_path, "writer.py", MARKER_WRITER)
+    _write_config(
+        root,
+        resources={"fake-writer": _resource(writer)},
+        goal={"implement_resource": "fake-writer", "review_policy": "never"},
+    )
+    comp = Composition(root)
+    _approved_goal(comp, "pending-before-invoke", checks=[("marker", "test -f marker.txt")])
+    runner = _goal_runner(comp)
+    original_invoke = runner._invoke_agent
+    first_entry = True
+
+    def inspect_before_invoke(*args: Any, **kwargs: Any) -> str:
+        nonlocal first_entry
+        if first_entry:
+            first_entry = False
+            durable = _run_state(comp, "pending-before-invoke")
+            assert durable["pending_writer_resource_id"] == "fake-writer"
+        return original_invoke(*args, **kwargs)
+
+    runner._invoke_agent = inspect_before_invoke  # type: ignore[method-assign]
+    assert runner.start("pending-before-invoke") is GoalStatus.ACHIEVED
 
 
 def test_pending_dirty_bytes_are_discarded_before_resume_attempt(

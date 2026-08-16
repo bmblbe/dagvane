@@ -22,6 +22,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from dagvane.adapters.localexec import GitOps, run_shell
+from dagvane.adapters.worktrees import (
+    ManagedWorktrees,
+    WorktreePurpose,
+    WorktreeSpec,
+)
 from dagvane.application.chat import ConversationStore
 from dagvane.application.goals import (
     PREPARE_INSTRUCTIONS,
@@ -32,6 +37,7 @@ from dagvane.application.goals import (
     parse_prepared_contract,
 )
 from dagvane.application.resources import ResourceCatalog, route_task
+from dagvane.domain.identifiers import validate_filesystem_id
 from dagvane.domain.models import SpecError
 from dagvane.ports.agent import AgentInvocation, ExternalAgentRunner
 from dagvane.ports.runtime import Clock, Monotonic
@@ -65,12 +71,23 @@ def prepare_goal(
     conversation_id: str,
     progress: Progress,
 ) -> GoalRecord:
+    # Canonical identity check first, before any Git/conversation/routing/
+    # runner/progress effect — every downstream use is the validated result.
+    name = validate_filesystem_id(name, ctx="prepare_goal: name")
     if goals.exists(name):
         existing = goals.load(name)
         if existing.status not in (GoalStatus.DRAFT, GoalStatus.PREPARED):
             raise SpecError(
                 f"goal {name!r} already exists with status {existing.status.value}"
             )
+    # Validate/load/bind the Conversation before any Git inspection, progress
+    # output, routing, prompt construction or agent invocation.
+    history = conversations.messages(conversation_id)
+    if not history:
+        raise SpecError(
+            f"conversation {conversation_id!r} is empty; chat with the "
+            "workspace first, then prepare the goal"
+        )
     if not GitOps.is_repo(workspace.root):
         raise SpecError(f"{workspace.root} is not a git repository")
     if not GitOps.is_clean(workspace.root):
@@ -81,12 +98,6 @@ def prepare_goal(
         )
     base_sha = GitOps.head_sha(workspace.root)
 
-    history = conversations.messages(conversation_id)
-    if not history:
-        raise SpecError(
-            f"conversation {conversation_id!r} is empty; chat with the "
-            "workspace first, then prepare the goal"
-        )
     transcript = "\n\n".join(
         f"[{item.get('role', '?')}]\n{item.get('text', '')}" for item in history
     )
@@ -147,7 +158,7 @@ def prepare_goal(
             "output_path": execution.output_path,
         },
     )
-    goals.save(record)
+    goals.save(name, record)
     goals.log_event(name, {"event": "goal.prepared", "base_sha": base_sha})
     progress(
         "prepared   draft only: no proposed command has been executed; "
@@ -162,38 +173,77 @@ def collect_baseline(
     config: WorkspaceConfig,
     goals: GoalStore,
     record: GoalRecord,
+    expected_name: str,
     monotonic: Monotonic,
     progress: Progress,
 ) -> None:
     """Post-approval baseline evidence at the exact approved base SHA.
 
+    ``expected_name`` is validated and required to match
+    ``record.contract.name`` exactly before any progress/Git/shell effect —
+    the mutable ``record`` payload never alone decides the identity that is
+    saved/logged or that names the disposable baseline worktree.
+
     Runs the owner-approved acceptance checks and verification gates in a
-    disposable worktree pinned to ``contract.base_sha`` — never in the
-    canonical worktree. Idempotent: an interrupted collection leaves the
-    baseline labeled ``pending`` and the next call starts over from a fresh
-    disposable worktree.
+    disposable *managed* worktree pinned to ``contract.base_sha`` — never in
+    the canonical worktree. The worktree lives and dies through the
+    ``ManagedWorktrees`` protocol: an unowned or hostile entry at the
+    deterministic target path fails closed and is preserved, and the
+    baseline is recorded ``completed`` only after the managed cleanup has
+    succeeded. Any failure — collection or cleanup — leaves the baseline
+    ``pending`` and retryable; a genuinely interrupted collection converges
+    on the next call, which removes the owned leftover through the managed
+    protocol and recreates it fresh.
     """
+    validated_expected = validate_filesystem_id(
+        expected_name, ctx="collect_baseline: expected_name"
+    )
     contract = record.contract
+    if validated_expected != contract.name:
+        raise SpecError(
+            f"collect_baseline: expected name {expected_name!r} does not "
+            f"match contract name {contract.name!r}"
+        )
     if record.status is not GoalStatus.APPROVED:
         raise SpecError(
-            f"goal {contract.name!r} is {record.status.value}; baseline "
+            f"goal {validated_expected!r} is {record.status.value}; baseline "
             "evidence is collected only after approval"
         )
+    spec = WorktreeSpec(
+        goal_name=validated_expected,
+        purpose=WorktreePurpose.BASELINE,
+        sha=contract.base_sha,
+    )
     timeout = int(str(config.get("goal.agent_timeout_seconds")))
-    worktree = workspace.worktrees_dir / f"{contract.name}-baseline"
+    manager = ManagedWorktrees(
+        repo_root=workspace.root, worktrees_root=workspace.worktrees_dir
+    )
+    worktree = manager.target_path(spec)
     progress(
         f"baseline   disposable worktree {worktree} @ {contract.base_sha[:12]}"
     )
-    GitOps.fresh_worktree(workspace.root, worktree, contract.base_sha)
+    handle = manager.create(spec)
+    # The generation-bearing handle keeps the symlink-safe per-target lease
+    # held across every baseline command and through proven cleanup. Even an
+    # exception in command execution attempts cleanup before the lease is
+    # released; a cleanup failure remains explicit and leaves baseline pending.
+    worktree = handle.path
+    baseline_checks: dict[str, object] = {}
+    baseline_verify: list[dict[str, object]] = []
     try:
-        baseline_checks: dict[str, object] = {}
         for check in contract.checks:
-            result = run_shell(
-                check.command,
-                cwd=worktree,
-                monotonic=monotonic,
-                timeout_seconds=timeout,
-            )
+            with handle.pinned_authority() as (
+                _worktree_fd,
+                _common_fd,
+                identity,
+            ):
+                result = run_shell(
+                    check.command,
+                    cwd=worktree,
+                    cwd_identity=identity,
+                    monotonic=monotonic,
+                    timeout_seconds=timeout,
+                )
             baseline_checks[check.check_id] = {
                 "ok": result.ok,
                 "exit_code": result.exit_code,
@@ -203,11 +253,19 @@ def collect_baseline(
                 f"baseline   {check.check_id}: "
                 f"{'already met' if result.ok else 'unmet'}"
             )
-        baseline_verify: list[dict[str, object]] = []
         for command in contract.verify_commands:
-            result = run_shell(
-                command, cwd=worktree, monotonic=monotonic, timeout_seconds=timeout
-            )
+            with handle.pinned_authority() as (
+                _worktree_fd,
+                _common_fd,
+                identity,
+            ):
+                result = run_shell(
+                    command,
+                    cwd=worktree,
+                    cwd_identity=identity,
+                    monotonic=monotonic,
+                    timeout_seconds=timeout,
+                )
             baseline_verify.append(
                 {
                     "command": command,
@@ -217,23 +275,22 @@ def collect_baseline(
                 }
             )
             progress(f"baseline   {command}: {'ok' if result.ok else 'failing'}")
-        record.baseline = {
-            **record.baseline,
-            "status": "completed",
-            "base_sha": contract.base_sha,
-            "checks": baseline_checks,
-            "verify": baseline_verify,
-        }
-        goals.save(record)
-        goals.log_event(
-            contract.name,
-            {"event": "baseline.completed", "base_sha": contract.base_sha},
-        )
     finally:
-        try:
-            GitOps.worktree_remove(workspace.root, worktree)
-        except SpecError:  # pragma: no cover — cleanup is best-effort
-            pass
+        # Managed cleanup is part of the baseline itself: only after the exact
+        # handle generation has provably been removed may evidence complete.
+        manager.remove(handle)
+    record.baseline = {
+        **record.baseline,
+        "status": "completed",
+        "base_sha": contract.base_sha,
+        "checks": baseline_checks,
+        "verify": baseline_verify,
+    }
+    goals.save(validated_expected, record)
+    goals.log_event(
+        validated_expected,
+        {"event": "baseline.completed", "base_sha": contract.base_sha},
+    )
 
 
 def baseline_completed(record: GoalRecord) -> bool:

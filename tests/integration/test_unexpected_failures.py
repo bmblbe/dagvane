@@ -66,8 +66,8 @@ class ExplodingBackend:
 class BrokenJournal(FilesystemEventJournal):
     """Fails every append at or beyond a chosen seq — a dying durable store."""
 
-    def __init__(self, path: Path, fail_at_seq: int) -> None:
-        super().__init__(path)
+    def __init__(self, path: Path, run_id: str, fail_at_seq: int) -> None:
+        super().__init__(path, run_id=run_id)
         self._fail_at_seq = fail_at_seq
 
     def append(self, envelope: EventEnvelope) -> bytes:
@@ -82,7 +82,7 @@ class BrokenJournalStore(FilesystemRunStore):
         self._fail_at_seq = fail_at_seq
 
     def open_journal(self, run_id: str) -> FilesystemEventJournal:
-        return BrokenJournal(self.run_dir(run_id) / EVENTS_FILENAME, self._fail_at_seq)
+        return BrokenJournal(self.run_dir(run_id) / EVENTS_FILENAME, run_id, self._fail_at_seq)
 
 
 def test_backend_runtime_error_yields_a_durable_failed_run(tmp_path: Path) -> None:

@@ -8,11 +8,11 @@ content hashes plus normalized content.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from dagvane.domain.identifiers import validate_filesystem_id
 from dagvane.domain.models import (
     Budget,
     BudgetOverrides,
@@ -30,8 +30,6 @@ FIXTURE_VERSION = 1
 DECISION_VERSION = 1
 MANIFEST_VERSION = 1
 REPORT_VERSION = 1
-
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _load_json_object(path: Path, what: str) -> dict[str, object]:
@@ -201,9 +199,7 @@ def load_fixture_file(path: Path) -> FixtureSpec:
 
     run_id: str | None = None
     if "run_id" in obj:
-        run_id = _req_str(obj, "run_id", ctx)
-        if not _RUN_ID_RE.match(run_id):
-            raise SpecError(f"{ctx}: run_id {run_id!r} must match {_RUN_ID_RE.pattern}")
+        run_id = validate_filesystem_id(_req_str(obj, "run_id", ctx), ctx=f"{ctx}: run_id")
 
     clock_start: str | None = None
     clock_step_ms: int | None = None

@@ -38,7 +38,13 @@ class AgentInvocation:
     # When set, the runner persists the spawned process identity (pid/pgid)
     # here while the child runs, enabling owner cancellation and resume-time
     # orphan reconciliation from another process. Removed after reaping.
+    # ``process_record_path`` must be exactly
+    # ``<process_record_root>/<filesystem id>/agent-process.json`` under the
+    # caller's Goal authority root; both fields are provided together or not
+    # at all, and the runner validates and pins the owner directory before
+    # any other effect.
     process_record_path: Path | None = None
+    process_record_root: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)

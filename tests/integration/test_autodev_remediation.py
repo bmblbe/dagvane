@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from dagvane.adapters.localexec import GitOps
+from dagvane.adapters.worktrees import ManagedWorktrees, WorktreePurpose, WorktreeSpec
 from dagvane.application.autodev import RunState
 from dagvane.application.goals import (
     AcceptanceCheck,
@@ -175,7 +176,7 @@ def _approved_goal(
         },
     )
     approve(record)
-    comp.goals.save(record)
+    comp.goals.save(name, record)
     return record
 
 
@@ -276,12 +277,13 @@ def test_prepare_is_draft_only_and_baseline_runs_post_approval_in_disposable_wor
     # After explicit approval the commands run — in a disposable worktree at
     # the exact approved base SHA, never in the canonical worktree.
     approve(record)
-    comp.goals.save(record)
+    comp.goals.save("draft-goal", record)
     collect_baseline(
         workspace=comp.workspace,
         config=comp.config,
         goals=comp.goals,
         record=record,
+        expected_name="draft-goal",
         monotonic=comp.monotonic,
         progress=lambda _line: None,
     )
@@ -311,15 +313,28 @@ def test_interrupted_baseline_is_retried_at_goal_run(tmp_path: Path) -> None:
         goal={"implement_resource": "fake-agent", "review_policy": "never"},
     )
     comp = Composition(root)
-    _approved_goal(
+    record = _approved_goal(
         comp,
         "pending-baseline",
         checks=[("marker", "test -f marker.txt")],
         baseline_completed=False,
     )
-    # Simulate a stale worktree left by the interrupted first collection.
+    # Simulate a *genuinely managed* interruption of the first collection:
+    # the baseline worktree was created through the managed protocol (owner
+    # record + exact registration) but the collection crashed before its
+    # managed cleanup. An unowned stray at the same path would be refused.
     stale = comp.workspace.worktrees_dir / "pending-baseline-baseline"
-    GitOps.worktree_add(root, stale, GitOps.head_sha(root))
+    manager = ManagedWorktrees(
+        repo_root=comp.workspace.root, worktrees_root=comp.workspace.worktrees_dir
+    )
+    spec = WorktreeSpec(
+        goal_name="pending-baseline",
+        purpose=WorktreePurpose.BASELINE,
+        sha=record.contract.base_sha,
+    )
+    stale_handle = manager.create(spec)
+    assert stale_handle.path == stale
+    stale_handle.close()  # simulate the interrupted collector process
 
     status = _goal_runner(comp).start("pending-baseline")
     assert status is GoalStatus.ACHIEVED
@@ -329,6 +344,13 @@ def test_interrupted_baseline_is_retried_at_goal_run(tmp_path: Path) -> None:
     assert isinstance(retried_checks, dict)
     assert retried_checks["marker"]["ok"] is False  # unmet at base
     assert not stale.exists()  # the retry replaced and removed the stale worktree
+    owner_path = (
+        comp.workspace.worktrees_dir / ".owners" / "pending-baseline-baseline.json"
+    )
+    latest, _valid = ManagedWorktrees._latest_record_document(  # noqa: SLF001
+        owner_path.read_bytes(), "test owner record"
+    )
+    assert json.loads(latest)["state"] == "removed"
 
 
 def test_prepare_refuses_a_dirty_repository(tmp_path: Path) -> None:
@@ -556,11 +578,11 @@ def test_crash_between_start_writes_reconciles_on_resume(tmp_path: Path) -> None
     original_save = GoalStore.save
     fired = {"done": False}
 
-    def exploding_save(self: GoalStore, record: GoalRecord) -> None:
+    def exploding_save(self: GoalStore, expected_name: str, record: GoalRecord) -> None:
         if record.status is GoalStatus.RUNNING and not fired["done"]:
             fired["done"] = True
             raise RuntimeError("injected crash between start writes")
-        original_save(self, record)
+        original_save(self, expected_name, record)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(GoalStore, "save", exploding_save)
@@ -585,10 +607,10 @@ def test_crash_between_finish_writes_reconciles_without_losing_the_result(
     comp = _marker_goal_composition(tmp_path, "crash-finish")
     original_save = GoalStore.save
 
-    def exploding_save(self: GoalStore, record: GoalRecord) -> None:
+    def exploding_save(self: GoalStore, expected_name: str, record: GoalRecord) -> None:
         if record.status is GoalStatus.ACHIEVED:
             raise RuntimeError("injected crash between finish writes")
-        original_save(self, record)
+        original_save(self, expected_name, record)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(GoalStore, "save", exploding_save)
@@ -625,7 +647,7 @@ def test_cancelled_goal_with_running_state_reconciles(tmp_path: Path) -> None:
         comp.goals.goal_dir("crash-cancel") / "run-state.json", state.to_doc()
     )
     record.status = GoalStatus.CANCELLED
-    comp.goals.save(record)
+    comp.goals.save("crash-cancel", record)
 
     assert _goal_runner(comp).resume("crash-cancel") is GoalStatus.CANCELLED
     assert _run_state(comp, "crash-cancel")["status"] == "cancelled"
@@ -679,8 +701,8 @@ output.write_text("done", encoding="utf-8")
 
 def test_lease_refuses_second_holder_and_releases_cleanly(tmp_path: Path) -> None:
     path = tmp_path / "lease.lock"
-    first = GoalLease(path)
-    second = GoalLease(path)
+    first = GoalLease(path, allowed_root=tmp_path)
+    second = GoalLease(path, allowed_root=tmp_path)
     first.acquire(owner="test-first")
     with pytest.raises(SpecError, match="another process"):
         second.acquire(owner="test-second")
@@ -750,7 +772,9 @@ output.write_text("finished anyway", encoding="utf-8")
     worktree = Path(state["worktree"])
     assert not (worktree / "post-cancel.txt").exists()
     assert GitOps.head_sha(worktree) == record.contract.base_sha
-    assert state["candidate_sha"] is None
+    # The managed candidate generation is durably bound to the unchanged base
+    # SHA before any writer effect; cancellation retains that exact anchor.
+    assert state["candidate_sha"] == record.contract.base_sha
     assert _goal_doc(comp, "cancel-goal")["status"] == "cancelled"
     # Releasing the barrier afterwards changes nothing: the writer is dead.
     (tmp_path / "release").write_text("", encoding="utf-8")

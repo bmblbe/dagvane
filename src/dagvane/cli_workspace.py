@@ -21,9 +21,9 @@ from dagvane.adapters.localexec import GitOps
 from dagvane.application.autodev import GoalRunner, goal_show_doc
 from dagvane.application.chat import ConversationStore, run_chat
 from dagvane.application.goals import GoalStatus, GoalStore, approve
-from dagvane.application.localmodel import probe_local_model
 from dagvane.application.prepare import collect_baseline, prepare_goal
 from dagvane.application.resources import ResourceCatalog
+from dagvane.domain.identifiers import validate_conversation_id
 from dagvane.domain.models import SpecError
 from dagvane.ports.runtime import SystemClock, SystemIds, SystemMonotonic
 from dagvane.workspace.config import WorkspaceConfig
@@ -106,8 +106,9 @@ def add_workspace_parsers(commands: argparse._SubParsersAction) -> None:  # type
 
 
 def _resolve_conversation(comp: Composition, args: argparse.Namespace) -> str:
-    if getattr(args, "conversation", None):
-        conversation_id = str(args.conversation)
+    conversation = getattr(args, "conversation", None)
+    if conversation is not None:
+        conversation_id = validate_conversation_id(conversation, ctx="--conversation")
         if not comp.conversations.exists(conversation_id):
             raise SpecError(f"unknown conversation {conversation_id!r}")
         comp.conversations.set_current(conversation_id)
@@ -255,7 +256,7 @@ def cmd_goal(args: argparse.Namespace) -> int:
     if command == "approve":
         record = comp.goals.load(name)
         approve(record)
-        comp.goals.save(record)
+        comp.goals.save(name, record)
         comp.goals.log_event(name, {"event": "goal.approved"})
         # Only now — after the owner approved the visible contract — are the
         # (previously draft-only) commands executed for baseline evidence, in
@@ -265,6 +266,7 @@ def cmd_goal(args: argparse.Namespace) -> int:
             config=comp.config,
             goals=comp.goals,
             record=record,
+            expected_name=name,
             monotonic=comp.monotonic,
             progress=_progress,
         )
@@ -273,21 +275,23 @@ def cmd_goal(args: argparse.Namespace) -> int:
     if command == "cancel":
         record = comp.goals.load(name)
         record.status = GoalStatus.CANCELLED
-        comp.goals.save(record)
+        comp.goals.save(name, record)
         comp.goals.log_event(name, {"event": "goal.cancelled"})
         # Cancellation must actually stop an in-flight writer, not just
         # record intent: terminate the recorded agent process group.
         runner = _goal_runner(comp)
-        if terminate_recorded_process(runner.process_record_path(name)):
+        if terminate_recorded_process(
+            runner.process_record_path(name), allowed_root=runner.process_record_root
+        ):
             comp.goals.log_event(name, {"event": "goal.cancel_killed_agent"})
             _progress("cancel     terminated the active external agent process group")
         print(f"goal {name} cancelled")
         return 0
     if command in ("run", "resume"):
         runner = _goal_runner(comp)
-        if bool(comp.config.get("router.local_enabled")):
-            available = probe_local_model(comp.catalog)
-            _progress(f"local      ollama {'available' if available else 'unavailable'}")
+        # The Ollama availability probe runs inside GoalRunner.start/resume,
+        # after (and only after) the Goal/RunState preflight binds cleanly —
+        # a single load/bind path, not a duplicate, racy CLI-side one.
         status = (
             runner.start(name) if command == "run" else runner.resume(name)
         )

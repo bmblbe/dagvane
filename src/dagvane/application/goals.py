@@ -15,13 +15,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from dagvane.domain.models import SpecError
+from dagvane.domain.identifiers import validate_filesystem_id
+from dagvane.domain.models import SpecError, StorageError
 from dagvane.ports.runtime import Clock
 from dagvane.protocol.frames import canonical_json_bytes, sha256_hex
 from dagvane.workspace.paths import (
     Workspace,
     append_jsonl,
     atomic_write_json,
+    ensure_expected_descendant,
     read_json,
 )
 
@@ -76,6 +78,13 @@ class GoalContract:
     checks: list[AcceptanceCheck]
     verify_commands: list[str]  # global gates (pytest/ruff/mypy equivalents)
     limits: GoalLimits
+
+    def __post_init__(self) -> None:
+        # Single enforcement point: every construction path (direct, parsed
+        # from a durable doc, or parsed from a preparation agent's output)
+        # goes through this dataclass, so the filesystem-ID contract is
+        # applied uniformly with no coercion/normalization.
+        validate_filesystem_id(self.name, ctx="goal contract: name")
 
 
 def contract_to_doc(contract: GoalContract) -> dict[str, object]:
@@ -181,18 +190,90 @@ class GoalStore:
         self._clock = clock
 
     def goal_dir(self, name: str) -> Path:
-        return self._workspace.goals_dir / name
+        """The one place a Goal name becomes a path: validated first, then
+        confirmed as a strict, symlink-free descendant of the goals root, so
+        every reader/writer downstream inherits the same closed guard."""
+        validated = validate_filesystem_id(name, ctx="goal name")
+        path = self._workspace.goals_dir / validated
+        ensure_expected_descendant(self._workspace.goals_dir, path)
+        return path
 
     def _goal_path(self, name: str) -> Path:
-        return self.goal_dir(name) / "goal.json"
+        path = self.goal_dir(name) / "goal.json"
+        ensure_expected_descendant(self._workspace.goals_dir, path)
+        return path
+
+    def _log_path(self, name: str) -> Path:
+        path = self.goal_dir(name) / "log.jsonl"
+        ensure_expected_descendant(self._workspace.goals_dir, path)
+        return path
+
+    def _sidecar_path(self, name: str, leaf: str) -> Path:
+        """One guarded join for a fixed sidecar leaf: validated Goal ID,
+        guarded Goal dir, then a strict, symlink-free descendant check on the
+        exact leaf — the only three leaves this method is called with are
+        ``lease.lock``, ``run-state.json``, and ``agent-process.json``; there
+        is no path from a caller-supplied leaf string."""
+        path = self.goal_dir(name) / leaf
+        ensure_expected_descendant(self._workspace.goals_dir, path)
+        return path
+
+    def lease_path(self, name: str) -> Path:
+        """Guarded path of the per-goal exclusive-run lease file."""
+        return self._sidecar_path(name, "lease.lock")
+
+    def run_state_path(self, name: str) -> Path:
+        """Guarded path of the durable goal-run resume state."""
+        return self._sidecar_path(name, "run-state.json")
+
+    def agent_process_path(self, name: str) -> Path:
+        """Guarded path of the in-flight external-agent process record."""
+        return self._sidecar_path(name, "agent-process.json")
 
     def exists(self, name: str) -> bool:
-        return self._goal_path(name).exists()
+        """A goal name "exists" only if its durable manifest is present and
+        its contract identity matches ``name`` exactly. A present-but-absent
+        goal.json is ordinary absence (``False``); a present-but-corrupt or
+        mismatched one is a fail-closed error, never a silent ``False``."""
+        validated_name = validate_filesystem_id(name, ctx="goal exists: name")
+        goal_path = self._goal_path(validated_name)
+        if not goal_path.exists():
+            return False
+        self._assert_durable_identity(validated_name)
+        return True
 
-    def save(self, record: GoalRecord) -> None:
+    def save(self, expected_name: str, record: GoalRecord) -> None:
+        """Persist ``record`` at ``expected_name``.
+
+        ``expected_name`` and ``record.contract.name`` are each validated,
+        then required to match exactly — the update destination is never
+        derived solely from the mutable payload. If a goal directory already
+        exists, it must already carry a durable manifest whose identity
+        matches exactly before any byte or ``updated_ts`` is touched: a bare
+        directory (no goal.json) or a malformed/mismatched one is refused,
+        not silently adopted or repaired.
+        """
+        validated_expected = validate_filesystem_id(expected_name, ctx="goal save: expected_name")
+        validated_contract_name = validate_filesystem_id(
+            record.contract.name, ctx="goal save: contract.name"
+        )
+        if validated_expected != validated_contract_name:
+            raise SpecError(
+                f"goal save: expected name {expected_name!r} does not match "
+                f"contract name {record.contract.name!r}"
+            )
+        goal_dir = self.goal_dir(validated_expected)
+        goal_path = self._goal_path(validated_expected)
+        if goal_dir.exists():
+            if not goal_path.exists():
+                raise StorageError(
+                    f"goal {validated_expected!r}: existing goal directory has no "
+                    "goal.json to update"
+                )
+            self._assert_durable_identity(validated_expected)
         record.updated_ts = self._clock.now_iso()
         atomic_write_json(
-            self._goal_path(record.contract.name),
+            self._goal_path(validated_expected),
             {
                 "contract": contract_to_doc(record.contract),
                 "status": record.status.value,
@@ -203,19 +284,37 @@ class GoalStore:
                 "amendments": record.amendments,
                 "evidence": record.evidence,
             },
+            allowed_root=self._workspace.goals_dir,
         )
 
-    def load(self, name: str) -> GoalRecord:
-        if not self.exists(name):
-            raise SpecError(f"unknown goal {name!r}")
-        doc = read_json(self._goal_path(name))
+    def _assert_durable_identity(self, name: str) -> dict[str, Any]:
+        """Read the durable goal doc and require its contract name to equal
+        the requested/directory identity ``name`` exactly (strict string
+        comparison). Fails closed on mismatch or malformed identity."""
+        doc = read_json(self._goal_path(name), allowed_root=self._workspace.goals_dir)
         contract_doc = doc.get("contract")
         if not isinstance(contract_doc, dict):
             raise SpecError(f"goal {name!r}: malformed contract")
+        contract_name = contract_doc.get("name")
+        if not isinstance(contract_name, str) or contract_name != name:
+            raise SpecError(
+                f"goal {name!r}: durable contract name {contract_name!r} does "
+                "not match the requested/directory identity"
+            )
+        return doc
+
+    def load(self, name: str) -> GoalRecord:
+        validated_name = validate_filesystem_id(name, ctx="goal load: name")
+        if not self.exists(validated_name):
+            raise SpecError(f"unknown goal {validated_name!r}")
+        doc = self._assert_durable_identity(validated_name)
+        contract_doc = doc["contract"]
         try:
             status = GoalStatus(str(doc.get("status")))
         except ValueError as exc:
-            raise SpecError(f"goal {name!r}: unknown status {doc.get('status')!r}") from exc
+            raise SpecError(
+                f"goal {validated_name!r}: unknown status {doc.get('status')!r}"
+            ) from exc
         baseline_raw = doc.get("baseline")
         amendments_raw = doc.get("amendments")
         evidence_raw = doc.get("evidence")
@@ -241,24 +340,47 @@ class GoalStore:
             actual = contract_hash(record.contract)
             if actual != record.contract_sha256:
                 raise SpecError(
-                    f"goal {name!r}: the approved contract was modified after "
-                    "approval (hash mismatch) — record a CONTRACT_AMENDMENT_REQUIRED "
-                    "instead of editing the contract"
+                    f"goal {validated_name!r}: the approved contract was modified "
+                    "after approval (hash mismatch) — record a "
+                    "CONTRACT_AMENDMENT_REQUIRED instead of editing the contract"
                 )
         return record
 
     def list_names(self) -> list[str]:
-        if not self._workspace.goals_dir.exists():
+        """Enumerate durable goal names, failing closed on anything that is
+        not an ordinary absence: an invalid directory name, a symlinked
+        candidate, or a durable object that does not load/validate is a
+        corruption/tampering signal, not something to hide by omission."""
+        goals_dir = self._workspace.goals_dir
+        if goals_dir.is_symlink():
+            raise StorageError(f"{goals_dir}: symlink is not an allowed goals root")
+        if not goals_dir.exists():
             return []
-        return sorted(
-            path.name
-            for path in self._workspace.goals_dir.iterdir()
-            if (path / "goal.json").exists()
-        )
+        if not goals_dir.is_dir():
+            raise StorageError(f"{goals_dir}: goals root must be a directory")
+        names: list[str] = []
+        for path in sorted(goals_dir.iterdir()):
+            if path.is_symlink():
+                raise StorageError(f"{path}: symlink is not an allowed goal entry")
+            if not path.is_dir():
+                raise StorageError(f"{path}: goals root must contain only goal directories")
+            name = validate_filesystem_id(path.name, ctx="goal list: name")
+            goal_path = path / "goal.json"
+            if goal_path.is_symlink():
+                raise StorageError(f"{goal_path}: symlink is not an allowed goal file")
+            if not goal_path.exists():
+                raise StorageError(f"{path}: goal directory is missing goal.json")
+            self.load(name)
+            names.append(name)
+        return sorted(names)
 
     def log_event(self, name: str, event: dict[str, object]) -> None:
+        validated_name = validate_filesystem_id(name, ctx="goal log: name")
+        if not self.exists(validated_name):
+            raise SpecError(f"unknown goal {validated_name!r}")
+        self._assert_durable_identity(validated_name)
         doc = {"ts": self._clock.now_iso(), **event}
-        append_jsonl(self.goal_dir(name) / "log.jsonl", doc)
+        append_jsonl(self._log_path(validated_name), doc, allowed_root=self._workspace.goals_dir)
 
 
 def contract_hash(contract: GoalContract) -> str:

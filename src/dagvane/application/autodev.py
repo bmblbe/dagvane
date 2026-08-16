@@ -44,31 +44,135 @@ Remediated invariants (Codex acceptance review at ``b40b9fb``):
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from dagvane.adapters.agents.subprocess_runner import terminate_recorded_process
 from dagvane.adapters.localexec import CommandResult, GitOps, run_shell
+from dagvane.adapters.worktrees import (
+    ManagedWorktreeHandle,
+    ManagedWorktrees,
+    WorktreePurpose,
+    WorktreeSpec,
+    validate_worktree_sha,
+)
 from dagvane.application.goals import (
     GoalRecord,
     GoalStatus,
     GoalStore,
     contract_to_doc,
 )
+from dagvane.application.localmodel import probe_local_model
 from dagvane.application.prepare import baseline_completed, collect_baseline
 from dagvane.application.resources import ResourceCatalog, RoutingDecision, route_task
-from dagvane.domain.models import SpecError
+from dagvane.domain.identifiers import validate_filesystem_id
+from dagvane.domain.models import SpecError, StorageError
 from dagvane.domain.secrets import SecretScrubber, process_scrubber
 from dagvane.ports.agent import AgentInvocation, ExternalAgentRunner
 from dagvane.ports.runtime import Clock, IdSource, Monotonic, parse_iso_ms
 from dagvane.protocol.frames import sha256_hex
 from dagvane.workspace.config import WorkspaceConfig
 from dagvane.workspace.lease import GoalLease
-from dagvane.workspace.paths import Workspace, atomic_write_json, read_json
+from dagvane.workspace.paths import (
+    Workspace,
+    atomic_write_json,
+    ensure_expected_descendant,
+    read_json,
+)
 
 Progress = Callable[[str], None]
+
+
+class ManagedWorktreeLifecycle(Protocol):
+    """The immutable managed-worktree lifecycle used by every checkout."""
+
+    def target_path(self, spec: WorktreeSpec) -> Path: ...
+
+    def create(self, spec: WorktreeSpec) -> ManagedWorktreeHandle: ...
+
+    def remove(self, handle: ManagedWorktreeHandle) -> None: ...
+
+
+class CandidateWorktreeLeaseV2(Protocol):
+    """Live candidate lease whose binding is manager-authoritative."""
+
+    @property
+    def path(self) -> Path: ...
+
+    @property
+    def bound_sha(self) -> str: ...
+
+    @property
+    def generation(self) -> str: ...
+
+    @contextmanager
+    def pinned_authority(self) -> Iterator[tuple[int, int, tuple[int, int]]]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class CandidateWorktreeLifecycleV2(Protocol):
+    """Required mutable-candidate extension to the managed lifecycle.
+
+    Acquisition is owner/run/purpose based, not raw-path based.  It recovers
+    an existing generation without recreating it and returns the manager's
+    authoritative ``bound_sha``; a state-file SHA is only an assertion hint.
+    Returning ``None`` means the manager proved there is no live generation,
+    target, or registration (a durable removed tombstone may remain); a
+    collision, corruption, or ambiguous partial lifecycle raises instead.
+
+    A SHA change is two-phase. ``begin_sha_advance`` durably records the old
+    binding *before* Git may commit. ``complete_sha_advance`` accepts only the
+    same live generation at a clean detached one-child commit of the old SHA,
+    then durably binds the new SHA. Recovery of an ``advancing`` generation
+    must either complete that exact transition or restore the proven old
+    state. This closes both commit→record and record→run-state crash windows.
+
+    Callers test this capability before creating a candidate worktree, so a
+    partial/older injected adapter fails closed with no fallback to a raw path,
+    ``git worktree prune``, or recursive deletion.
+    """
+
+    def acquire_existing(
+        self, spec: WorktreeSpec
+    ) -> CandidateWorktreeLeaseV2 | None: ...
+
+    def create_candidate(self, spec: WorktreeSpec) -> CandidateWorktreeLeaseV2: ...
+
+    def prove_for_use(
+        self,
+        handle: CandidateWorktreeLeaseV2,
+        *,
+        expected_bound_sha: str,
+    ) -> Path:
+        """Re-prove the live generation immediately around a path effect.
+
+        The manager keeps the lifecycle lease held and proves pinned
+        repository/root authority, record nonce/inode, public target inode,
+        exact detached registration, and ``expected_bound_sha`` before it
+        returns the one canonical path.
+        """
+        ...
+
+    def begin_sha_advance(
+        self,
+        handle: CandidateWorktreeLeaseV2,
+        *,
+        expected_old_sha: str,
+    ) -> object: ...
+
+    def complete_sha_advance(
+        self,
+        handle: CandidateWorktreeLeaseV2,
+        token: object,
+        *,
+        new_sha: str,
+    ) -> None: ...
+
 
 REVIEW_SEVERITIES = ("BLOCKER", "MAJOR", "MINOR", "OPTIONAL")
 BLOCKING_SEVERITIES = ("BLOCKER", "MAJOR")
@@ -82,7 +186,12 @@ _EVIDENCE_TAIL_CHARS = 2000
 
 @dataclass(slots=True)
 class RunState:
-    """Durable goal-run state: the resume contract."""
+    """Durable goal-run state: the resume contract.
+
+    ``run_id`` and ``goal_name`` are filesystem-backed identifiers: every
+    construction path (direct or parsed from a durable doc) validates them
+    with no coercion/normalization, matching ``GoalContract.name`` above.
+    """
 
     run_id: str
     goal_name: str
@@ -106,6 +215,10 @@ class RunState:
     verification: dict[str, object] | None = None
     implement_resource_id: str | None = None
     finish_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        validate_filesystem_id(self.run_id, ctx="run state: run_id")
+        validate_filesystem_id(self.goal_name, ctx="run state: goal_name")
 
     def to_doc(self) -> dict[str, object]:
         return {
@@ -135,30 +248,73 @@ class RunState:
 
     @staticmethod
     def from_doc(doc: dict[str, Any]) -> RunState:
+        # Durable identity/binding fields: a missing key or a malformed type
+        # (int/bool/null/container instead of a real string) is corruption
+        # and surfaces as a controlled SpecError, never a raw KeyError/
+        # TypeError and never a silent str()/None coercion.
+        def req_str(key: str) -> str:
+            if key not in doc:
+                raise SpecError(f"run state: missing required field {key!r}")
+            value = doc[key]
+            if not isinstance(value, str):
+                raise SpecError(
+                    f"run state: {key!r} must be a string, got "
+                    f"{type(value).__name__}"
+                )
+            return value
+
+        def opt_str(key: str) -> str | None:
+            if key not in doc or doc[key] is None:
+                return None
+            value = doc[key]
+            if not isinstance(value, str):
+                raise SpecError(
+                    f"run state: {key!r} must be a string or null, got "
+                    f"{type(value).__name__}"
+                )
+            return value
+
+        def opt_sha(key: str) -> str | None:
+            value = opt_str(key)
+            if value is None:
+                return None
+            return validate_worktree_sha(value, ctx=f"run state: {key}")
+
+        candidate_sha = opt_sha("candidate_sha")
+        tested_sha = opt_sha("tested_sha")
+        review_passed_for = opt_sha("review_passed_for")
+        if tested_sha is not None and tested_sha != candidate_sha:
+            raise SpecError(
+                "run state: tested_sha must equal the persisted candidate_sha"
+            )
+        if review_passed_for is not None and candidate_sha is None:
+            raise SpecError(
+                "run state: review_passed_for requires a persisted candidate_sha"
+            )
+        if (
+            review_passed_for is not None
+            and review_passed_for == candidate_sha
+            and tested_sha is None
+        ):
+            raise SpecError(
+                "run state: review_passed_for cannot mark the current candidate "
+                "without matching tested_sha evidence"
+            )
+
         return RunState(
-            run_id=str(doc["run_id"]),
-            goal_name=str(doc["goal_name"]),
-            base_sha=str(doc["base_sha"]),
-            status=str(doc["status"]),
-            started_ts=str(doc["started_ts"]),
-            worktree=doc.get("worktree") if isinstance(doc.get("worktree"), str) else None,
-            candidate_sha=(
-                doc.get("candidate_sha")
-                if isinstance(doc.get("candidate_sha"), str)
-                else None
-            ),
-            tested_sha=(
-                doc.get("tested_sha") if isinstance(doc.get("tested_sha"), str) else None
-            ),
+            run_id=req_str("run_id"),
+            goal_name=req_str("goal_name"),
+            base_sha=req_str("base_sha"),
+            status=req_str("status"),
+            started_ts=req_str("started_ts"),
+            worktree=opt_str("worktree"),
+            candidate_sha=candidate_sha,
+            tested_sha=tested_sha,
             agent_calls=int(doc.get("agent_calls", 0)),
             attempts=int(doc.get("attempts", 0)),
             consecutive_failures=int(doc.get("consecutive_failures", 0)),
             last_unmet=[str(x) for x in doc.get("last_unmet", [])],
-            review_passed_for=(
-                doc.get("review_passed_for")
-                if isinstance(doc.get("review_passed_for"), str)
-                else None
-            ),
+            review_passed_for=review_passed_for,
             review_findings=[
                 dict(item)
                 for item in doc.get("review_findings", [])
@@ -238,6 +394,8 @@ def build_implement_prompt(
         "",
         "Rules:",
         "- Work only inside this worktree. Do not push, do not merge.",
+        "- Do not commit, reset, checkout, or otherwise move Git HEAD;",
+        "  Dagvane owns the crash-safe candidate commit transition.",
         "- Do not modify or weaken the acceptance commands or existing tests",
         "  unless a check is itself the deliverable.",
         "- Keep the change bounded; follow the repository's conventions.",
@@ -357,6 +515,23 @@ class _CandidateEvaluation:
     skip_writer: bool = False  # review infrastructure retry: no writer work
 
 
+@dataclass(slots=True)
+class _CandidateWorktreeUse:
+    """One live, generation-bound mutable candidate checkout."""
+
+    lifecycle: CandidateWorktreeLifecycleV2
+    handle: CandidateWorktreeLeaseV2
+    expected_path: Path
+
+    @property
+    def path(self) -> Path:
+        return self.handle.path
+
+    @property
+    def sha(self) -> str:
+        return self.handle.bound_sha
+
+
 class GoalRunner:
     """Foreground executor for ``goal run`` / ``goal resume``."""
 
@@ -373,6 +548,8 @@ class GoalRunner:
         ids: IdSource,
         progress: Progress,
         scrubber: SecretScrubber | None = None,
+        worktrees: ManagedWorktreeLifecycle | None = None,
+        candidate_worktrees: CandidateWorktreeLifecycleV2 | None = None,
     ) -> None:
         self._workspace = workspace
         self._config = config
@@ -384,33 +561,176 @@ class GoalRunner:
         self._ids = ids
         self._progress = progress
         self._scrubber = scrubber if scrubber is not None else process_scrubber()
+        self._worktrees = (
+            worktrees
+            if worktrees is not None
+            else ManagedWorktrees(
+                repo_root=workspace.root,
+                worktrees_root=workspace.worktrees_dir,
+            )
+        )
+        self._candidate_worktrees = candidate_worktrees
+        self._candidate_worktree: _CandidateWorktreeUse | None = None
 
     # -- durable state -----------------------------------------------------
 
     def _state_path(self, goal_name: str) -> Path:
-        return self._store.goal_dir(goal_name) / "run-state.json"
+        return self._store.run_state_path(goal_name)
 
-    def _save_state(self, state: RunState) -> None:
-        atomic_write_json(self._state_path(state.goal_name), state.to_doc())
+    def _save_state(self, record: GoalRecord, state: RunState) -> None:
+        """Persist ``state``. The destination directory comes from the
+        trusted, already-loaded Goal contract's name — never from
+        ``state.goal_name`` (mutable, and only as trustworthy as whatever
+        wrote the durable state) — and ``state`` is re-bound to that exact
+        contract (identity, base SHA, worktree) immediately before writing
+        a single byte. A state whose identity field was changed underneath
+        it (e.g. to a different goal) fails closed here and writes nowhere,
+        neither at the expected nor at any other Goal directory."""
+        expected_name = record.contract.name
+        self._bind_state(expected_name, record, state)
+        atomic_write_json(
+            self._state_path(expected_name),
+            state.to_doc(),
+            allowed_root=self._workspace.goals_dir,
+        )
 
-    def load_state(self, goal_name: str) -> RunState | None:
+    def _read_run_state(self, goal_name: str) -> RunState | None:
         path = self._state_path(goal_name)
+        if path.is_symlink():
+            raise StorageError(f"cannot read {path}: refusing to follow a symlink")
         if not path.exists():
             return None
-        return RunState.from_doc(read_json(path))
+        return RunState.from_doc(
+            read_json(path, allowed_root=self._workspace.goals_dir)
+        )
+
+    def _expected_worktree_path(
+        self, goal_name: str, run_id: str, sha: str
+    ) -> Path:
+        """The one deterministic writer-worktree path for a bound run: never
+        derived from a persisted string.  The managed lifecycle derives it
+        from a complete, validated candidate spec; this helper only asserts
+        the path when binding durable run-state and never grants lifecycle or
+        cleanup authority."""
+        expected = self._worktrees.target_path(
+            WorktreeSpec(
+                goal_name=goal_name,
+                run_id=run_id,
+                purpose=WorktreePurpose.CANDIDATE,
+                sha=sha,
+            )
+        )
+        ensure_expected_descendant(self._workspace.worktrees_dir, expected)
+        return expected
+
+    def _bind_state(
+        self, requested_name: str, record: GoalRecord, state: RunState
+    ) -> None:
+        """The single validation path every state load goes through: a
+        loaded state is usable only when the requested Goal name, the
+        durable contract identity, the run-state's own identity, the frozen
+        contract base SHA, and any persisted worktree claim are exactly
+        equal — byte-for-byte, no case-folding or coercion. A valid-but-
+        different, case-different, or wrong-type internal value is
+        corruption and fails closed before any lease/reconciliation/
+        process/Git/shell/agent effect uses the state."""
+        if requested_name != record.contract.name:
+            raise SpecError(
+                f"goal {requested_name!r}: durable contract identity does not "
+                "match the requested Goal"
+            )
+        if state.goal_name != requested_name:
+            raise SpecError(
+                f"goal {requested_name!r}: run-state.json goal_name "
+                f"{state.goal_name!r} does not match the requested Goal — "
+                "refusing a tampered or foreign run state"
+            )
+        if state.base_sha != record.contract.base_sha:
+            raise SpecError(
+                f"goal {requested_name!r}: run-state.json base_sha "
+                f"{state.base_sha!r} does not match the frozen contract "
+                f"base_sha {record.contract.base_sha!r}"
+            )
+        candidate_sha = state.candidate_sha or record.contract.base_sha
+        expected_worktree = self._expected_worktree_path(
+            state.goal_name, state.run_id, candidate_sha
+        )
+        if state.worktree is not None and state.worktree != str(expected_worktree):
+            raise SpecError(
+                f"goal {requested_name!r}: run-state.json worktree "
+                f"{state.worktree!r} does not match the deterministic "
+                f"expected path {expected_worktree}"
+            )
+
+    def _load_bound_state(
+        self, goal_name: str, record: GoalRecord
+    ) -> RunState | None:
+        state = self._read_run_state(goal_name)
+        if state is None:
+            return None
+        self._bind_state(goal_name, record, state)
+        return state
+
+    def load_state(self, goal_name: str) -> RunState | None:
+        """Load the durable run-state, bound to the exact requested Goal
+        identity, frozen contract base SHA, and deterministic worktree path
+        (see ``_bind_state``). This is the one loader every caller — CLI
+        ``show``, ``start``, and ``resume`` — uses, so pure display can
+        never print a mismatched state and start/resume can never build on
+        one."""
+        record = self._store.load(goal_name)
+        return self._load_bound_state(goal_name, record)
 
     def process_record_path(self, goal_name: str) -> Path:
         """Where the in-flight agent process identity is persisted."""
-        return self._store.goal_dir(goal_name) / "agent-process.json"
+        return self._store.agent_process_path(goal_name)
+
+    @property
+    def process_record_root(self) -> Path:
+        """The Goal authority root that every process-record path is
+        validated against."""
+        return self._workspace.goals_dir
 
     # -- entry points ------------------------------------------------------
 
+    def _probe_local_model(self) -> None:
+        """The Ollama availability probe: only ever called from inside the
+        held lease, after the under-lease Goal/RunState re-read, re-bind,
+        and every applicable status check have all passed — so a mutation
+        injected between the preflight read and the moment the lease is
+        actually acquired (caught by that re-read/re-bind) leaves the probe
+        call count at zero, exactly like every other lease-body effect.
+        Lives on the application runner (not the CLI) so there is exactly
+        one load/bind path, never a duplicate, racy CLI-side one."""
+        if bool(self._config.get("router.local_enabled")):
+            available = probe_local_model(self._catalog)
+            self._progress(
+                f"local      ollama {'available' if available else 'unavailable'}"
+            )
+
     def start(self, goal_name: str) -> GoalStatus:
-        lease = GoalLease(self._store.goal_dir(goal_name) / "lease.lock")
+        # Preflight: validate/load the exact requested Goal, and bind any
+        # existing durable run-state to it, with no lease/side effect. A
+        # corrupt existing state must not be hidden by starting a new run.
+        # The new run identity is generated and canonically validated here
+        # too — still pure preflight, still before the lease — so an
+        # invalid generated id leaves no lease or any other effect; if
+        # another run wins the lease below, this id is simply discarded,
+        # never persisted. Once the lease is actually held, Goal/state are
+        # re-read and re-bound from scratch before any lease-body effect
+        # (including the availability probe) uses them — this closes the
+        # preflight-to-lease race, not just the initial gap.
+        preflight_record = self._store.load(goal_name)
+        self._load_bound_state(goal_name, preflight_record)
+        run_id = self._ids.new_id("goalrun")
+        validate_filesystem_id(run_id, ctx="run state: run_id")
+        lease = GoalLease(
+            self._store.lease_path(goal_name), allowed_root=self._workspace.goals_dir
+        )
         lease.acquire(owner=f"goal-start:{goal_name}")
         try:
             record = self._store.load(goal_name)
-            existing = self.load_state(goal_name)
+            existing = self._load_bound_state(goal_name, record)
             if existing is not None and existing.status == "running":
                 raise SpecError(
                     f"goal {goal_name!r} already has an active run "
@@ -421,6 +741,7 @@ class GoalRunner:
                     f"goal {goal_name!r} is {record.status.value}; approve it first "
                     "(or use `goal resume` for a running goal)"
                 )
+            self._probe_local_model()
             if not baseline_completed(record):
                 self._progress(
                     "baseline   pending — collecting at the approved base SHA "
@@ -431,19 +752,20 @@ class GoalRunner:
                     config=self._config,
                     goals=self._store,
                     record=record,
+                    expected_name=goal_name,
                     monotonic=self._monotonic,
                     progress=self._progress,
                 )
             state = RunState(
-                run_id=self._ids.new_id("goalrun"),
+                run_id=run_id,
                 goal_name=goal_name,
                 base_sha=record.contract.base_sha,
                 status="running",
                 started_ts=self._clock.now_iso(),
             )
-            self._save_state(state)
+            self._save_state(record, state)
             record.status = GoalStatus.RUNNING
-            self._store.save(record)
+            self._store.save(goal_name, record)
             self._store.log_event(
                 goal_name, {"event": "run.started", "run_id": state.run_id}
             )
@@ -452,11 +774,22 @@ class GoalRunner:
             lease.release()
 
     def resume(self, goal_name: str) -> GoalStatus:
-        lease = GoalLease(self._store.goal_dir(goal_name) / "lease.lock")
+        # Preflight: validate/load the exact requested Goal and bind its
+        # durable run-state with no lease/side effect, then reload/rebind
+        # both again once the lease is actually held (mirrors `start`) —
+        # before reconciliation, orphan termination, status/evidence/log
+        # writes, the availability probe, or any Git/shell/agent work. This
+        # closes both the initial effect gap and the preflight-to-lease
+        # race.
+        preflight_record = self._store.load(goal_name)
+        self._load_bound_state(goal_name, preflight_record)
+        lease = GoalLease(
+            self._store.lease_path(goal_name), allowed_root=self._workspace.goals_dir
+        )
         lease.acquire(owner=f"goal-resume:{goal_name}")
         try:
             record = self._store.load(goal_name)
-            state = self.load_state(goal_name)
+            state = self._load_bound_state(goal_name, record)
             if state is None:
                 raise SpecError(f"goal {goal_name!r} has no run to resume")
             if state.status != "running":
@@ -486,7 +819,7 @@ class GoalRunner:
             if record.status is GoalStatus.APPROVED:
                 # Crash between run-state creation and the goal status write.
                 record.status = GoalStatus.RUNNING
-                self._store.save(record)
+                self._store.save(goal_name, record)
                 self._store.log_event(
                     goal_name,
                     {"event": "run.reconciled", "repair": "approved->running"},
@@ -496,6 +829,16 @@ class GoalRunner:
                 )
             elif record.status is GoalStatus.CANCELLED:
                 self._reap_orphan_writer(goal_name)
+                # A crash may have occurred after the candidate manager's
+                # durable advance began (or completed) but before run-state
+                # captured its authoritative SHA. Recover an existing
+                # generation before terminalizing cancellation; do not create
+                # a new candidate solely for a cancelled run.
+                candidate = self._open_candidate_worktree(
+                    record, state, create_if_missing=False
+                )
+                if candidate is not None:
+                    self._close_candidate_worktree()
                 return self._finish(
                     record, state, GoalStatus.CANCELLED, "cancelled by owner"
                 )
@@ -505,11 +848,20 @@ class GoalRunner:
                     f"{state.run_id} cannot resume"
                 )
             self._reap_orphan_writer(goal_name)
-            self._store.log_event(
-                goal_name, {"event": "run.resumed", "run_id": state.run_id}
-            )
-            self._progress(f"resume     run {state.run_id} from durable state")
-            return self._loop(record, state)
+            candidate = self._open_candidate_worktree(record, state)
+            assert candidate is not None
+            try:
+                # Candidate recovery/state reconciliation precedes optional
+                # availability probes and resume logging. No effect can use a
+                # stale RunState SHA after an interrupted managed advance.
+                self._probe_local_model()
+                self._store.log_event(
+                    goal_name, {"event": "run.resumed", "run_id": state.run_id}
+                )
+                self._progress(f"resume     run {state.run_id} from durable state")
+                return self._loop_with_candidate(record, state, candidate)
+            finally:
+                self._close_candidate_worktree()
         finally:
             lease.release()
 
@@ -517,7 +869,9 @@ class GoalRunner:
 
     def _reap_orphan_writer(self, goal_name: str) -> None:
         """Terminate an in-flight agent process left by a crashed run."""
-        if terminate_recorded_process(self.process_record_path(goal_name)):
+        if terminate_recorded_process(
+            self.process_record_path(goal_name), allowed_root=self._workspace.goals_dir
+        ):
             self._progress(
                 "reconcile  terminated an orphaned in-flight agent process "
                 "from a previous run"
@@ -534,7 +888,7 @@ class GoalRunner:
     ) -> GoalStatus:
         state.status = status.value
         state.finish_reason = reason
-        self._save_state(state)
+        self._save_state(record, state)
         self._finalize_record(record, state, status, reason)
         self._progress(f"result     {status.value}: {reason}")
         return status
@@ -557,7 +911,7 @@ class GoalRunner:
             "review_findings": list(state.review_findings),
             "reviews": list(state.reviews),
         }
-        self._store.save(record)
+        self._store.save(state.goal_name, record)
         self._store.log_event(
             state.goal_name,
             {"event": "run.finished", "status": status.value, "reason": reason},
@@ -568,54 +922,306 @@ class GoalRunner:
         now = parse_iso_ms(self._clock.now_iso())
         return int((now - started).total_seconds())
 
-    def _ensure_worktree(self, record: GoalRecord, state: RunState) -> Path:
-        if state.worktree is not None:
-            path = Path(state.worktree)
-            if path.exists():
-                return path
-        path = self._workspace.worktrees_dir / f"{state.goal_name}-{state.run_id}"
-        if not path.exists():
-            GitOps.worktree_add(self._workspace.root, path, record.contract.base_sha)
-            self._progress(f"worktree   {path} @ {record.contract.base_sha[:12]}")
-        state.worktree = str(path)
-        self._save_state(state)
+    def _candidate_lifecycle(self) -> CandidateWorktreeLifecycleV2:
+        """Require V2 before any candidate filesystem/Git/writer effect."""
+        lifecycle: object = (
+            self._candidate_worktrees
+            if self._candidate_worktrees is not None
+            else self._worktrees
+        )
+        if not isinstance(lifecycle, CandidateWorktreeLifecycleV2):
+            raise SpecError(
+                "candidate worktrees require managed lifecycle V2 "
+                "acquire/create plus two-phase SHA advance; "
+                "the configured adapter lacks that fail-closed capability"
+            )
+        return lifecycle
+
+    def _open_candidate_worktree(
+        self,
+        record: GoalRecord,
+        state: RunState,
+        *,
+        create_if_missing: bool = True,
+    ) -> _CandidateWorktreeUse | None:
+        """Create/recover and retain the one managed candidate generation."""
+        lifecycle = self._candidate_lifecycle()
+        sha = state.candidate_sha or record.contract.base_sha
+        spec = WorktreeSpec(
+            goal_name=state.goal_name,
+            run_id=state.run_id,
+            purpose=WorktreePurpose.CANDIDATE,
+            sha=sha,
+        )
+        handle = lifecycle.acquire_existing(spec)
+        if handle is None:
+            if not create_if_missing:
+                return None
+            if state.worktree is not None or state.candidate_sha is not None:
+                raise StorageError(
+                    "candidate manager proved no generation exists, but durable "
+                    "run state asserts a prior candidate; refusing to recreate "
+                    "from state-selected SHA"
+                )
+            create_spec = WorktreeSpec(
+                goal_name=state.goal_name,
+                run_id=state.run_id,
+                purpose=WorktreePurpose.CANDIDATE,
+                sha=record.contract.base_sha,
+            )
+            handle = lifecycle.create_candidate(create_spec)
+        try:
+            expected_path = self._expected_worktree_path(
+                state.goal_name, state.run_id, handle.bound_sha
+            )
+            use = _CandidateWorktreeUse(
+                lifecycle=lifecycle,
+                handle=handle,
+                expected_path=expected_path,
+            )
+            self._candidate_worktree = use
+            if handle.path != expected_path:
+                raise StorageError(
+                    f"candidate lifecycle returned path {handle.path}, expected "
+                    f"the canonical managed target {expected_path}"
+                )
+            with self._pinned_git_authority(handle) as _identity:
+                head = GitOps.head_sha(handle.path)
+            if head != handle.bound_sha:
+                raise StorageError(
+                    f"candidate lifecycle returned checkout HEAD {head}, but "
+                    f"its authoritative binding is {handle.bound_sha}"
+                )
+            self._prove_candidate_for_use(use)
+            # This persisted string is an assertion/evidence field only.  The
+            # live generation handle, never this path, authorizes all use and
+            # removal.
+            if state.worktree != str(handle.path):
+                state.worktree = str(handle.path)
+            # Manager truth wins during crash recovery. Persist it before any
+            # check/shell/agent effect; the prior state SHA is only an
+            # assertion supplied to acquisition, never lifecycle authority.
+            if state.candidate_sha != handle.bound_sha:
+                state.candidate_sha = handle.bound_sha
+                state.tested_sha = None
+                state.verification = None
+                state.verify_ok = None
+            self._save_state(record, state)
+            self._progress(
+                f"worktree   {handle.path} @ {handle.bound_sha[:12]} (managed)"
+            )
+            return use
+        except BaseException:
+            if self._candidate_worktree is not None:
+                self._close_candidate_worktree()
+            else:
+                handle.close()
+            raise
+
+    def _close_candidate_worktree(self) -> None:
+        use = self._candidate_worktree
+        if use is None:
+            return
+        self._candidate_worktree = None
+        # Candidate evidence is retained: releasing the lease never removes
+        # its checkout, Git registration, owner record, or commit anchor.
+        use.handle.close()
+
+    def _prove_candidate_for_use(
+        self,
+        use: _CandidateWorktreeUse,
+        *,
+        expected_sha: str | None = None,
+    ) -> Path:
+        """Manager proof plus application assertions around each path effect."""
+        sha = expected_sha if expected_sha is not None else use.sha
+        path = use.lifecycle.prove_for_use(
+            use.handle,
+            expected_bound_sha=sha,
+        )
+        if path != use.expected_path or path != use.handle.path:
+            raise StorageError(
+                f"candidate use proof returned path {path}, expected held "
+                f"canonical target {use.expected_path}"
+            )
+        ensure_expected_descendant(self._workspace.worktrees_dir, path)
+        with self._pinned_git_authority(use.handle) as _identity:
+            head = GitOps.head_sha(path)
+        if head != sha or use.sha != sha:
+            raise StorageError(
+                f"candidate use proof disagrees: checkout HEAD={head}, "
+                f"handle bound_sha={use.sha}, expected={sha}"
+            )
         return path
 
+    @staticmethod
+    @contextmanager
+    def _pinned_git_authority(
+        handle: CandidateWorktreeLeaseV2 | ManagedWorktreeHandle,
+    ) -> Iterator[tuple[int, int]]:
+        """Bind candidate Git's work tree and common directory to fds."""
+        with handle.pinned_authority() as (worktree_fd, _common_fd, identity):
+            # Candidate Git must retain the linked worktree's own ``.git``
+            # file/HEAD authority.  Supplying the common repository as
+            # ``--git-dir`` would instead address the main checkout's HEAD.
+            # The candidate fd is still the kernel-bound cwd authority and
+            # the lifecycle keeps the repository/common identities pinned.
+            with GitOps.pinned_worktree_authority(worktree_fd, None):
+                yield identity
+
+    def _commit_candidate(
+        self,
+        record: GoalRecord,
+        state: RunState,
+        use: _CandidateWorktreeUse,
+        message: str,
+    ) -> tuple[str, bool]:
+        """Two-phase managed commit, followed by exact run-state persistence."""
+        old_sha = use.sha
+        worktree = self._prove_candidate_for_use(use, expected_sha=old_sha)
+        with self._pinned_git_authority(use.handle) as _identity:
+            head_before = GitOps.head_sha(worktree)
+        if head_before != old_sha:
+            raise StorageError(
+                f"candidate worktree HEAD moved to {head_before} outside a "
+                f"managed SHA advance; expected {old_sha}"
+            )
+        with self._pinned_git_authority(use.handle) as _identity:
+            clean = GitOps.is_clean(worktree)
+        if clean:
+            candidate = old_sha
+            advanced = False
+        else:
+            token = use.lifecycle.begin_sha_advance(
+                use.handle, expected_old_sha=old_sha
+            )
+            with self._pinned_git_authority(use.handle) as _identity:
+                worktree = self._prove_candidate_for_use(
+                    use, expected_sha=old_sha
+                )
+                committed = GitOps.commit_all(worktree, message)
+                if committed is None:
+                    raise StorageError(
+                        "candidate became clean without producing the one commit "
+                        "required by its durable SHA-advance token"
+                    )
+                candidate = GitOps.head_sha(worktree)
+            use.lifecycle.complete_sha_advance(
+                use.handle, token, new_sha=candidate
+            )
+            if use.sha != candidate:
+                raise StorageError(
+                    "candidate lifecycle completed SHA advance but its live "
+                    "handle did not expose the authoritative new SHA"
+                )
+            self._prove_candidate_for_use(use, expected_sha=candidate)
+            advanced = True
+        if not advanced:
+            self._prove_candidate_for_use(use, expected_sha=candidate)
+        if state.candidate_sha != candidate:
+            state.candidate_sha = candidate
+            state.tested_sha = None
+            state.verification = None
+            state.verify_ok = None
+            self._save_state(record, state)
+        return candidate, advanced
+
+    def _create_immutable_worktree(
+        self, spec: WorktreeSpec
+    ) -> ManagedWorktreeHandle:
+        """Create one exact immutable generation and assert its returned path."""
+        expected = self._worktrees.target_path(spec)
+        ensure_expected_descendant(self._workspace.worktrees_dir, expected)
+        handle = self._worktrees.create(spec)
+        try:
+            if handle.path != expected:
+                raise StorageError(
+                    f"managed {spec.purpose.value} lifecycle returned path "
+                    f"{handle.path}, expected canonical target {expected}"
+                )
+            ensure_expected_descendant(self._workspace.worktrees_dir, handle.path)
+            with self._pinned_git_authority(handle) as _identity:
+                head = GitOps.head_sha(handle.path)
+            if head != spec.sha:
+                raise StorageError(
+                    f"managed {spec.purpose.value} lifecycle returned checkout "
+                    f"HEAD {head}, expected exact SHA {spec.sha}"
+                )
+            return handle
+        except BaseException:
+            # A mismatched handle is not cleanup authority for the expected
+            # target. Release its lease but preserve whatever generation the
+            # adapter actually returned for investigation/recovery.
+            handle.close()
+            raise
+
+    def _run_candidate_shell(
+        self,
+        command: str,
+        candidate_worktree: _CandidateWorktreeUse,
+        *,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        worktree = self._prove_candidate_for_use(candidate_worktree)
+        try:
+            with candidate_worktree.handle.pinned_authority() as (
+                _worktree_fd,
+                _common_fd,
+                identity,
+            ):
+                return run_shell(
+                    command,
+                    cwd=worktree,
+                    cwd_identity=identity,
+                    monotonic=self._monotonic,
+                    timeout_seconds=timeout_seconds,
+                    scrubber=self._scrubber,
+                )
+        finally:
+            self._prove_candidate_for_use(candidate_worktree)
+
     def _run_checks(
-        self, record: GoalRecord, worktree: Path
+        self, record: GoalRecord, candidate_worktree: _CandidateWorktreeUse
     ) -> dict[str, CommandResult]:
         timeout = int(str(self._config.get("goal.agent_timeout_seconds")))
         results: dict[str, CommandResult] = {}
         for check in record.contract.checks:
-            result = run_shell(
+            result = self._run_candidate_shell(
                 check.command,
-                cwd=worktree,
-                monotonic=self._monotonic,
+                candidate_worktree,
                 timeout_seconds=timeout,
-                scrubber=self._scrubber,
             )
             results[check.check_id] = result
             status = "ok" if result.ok else f"FAIL (exit {result.exit_code})"
             self._progress(f"check      {check.check_id}: {status}")
         return results
 
-    def _review_required(self, state: RunState, worktree: Path) -> bool:
+    def _review_required(
+        self, state: RunState, candidate_worktree: _CandidateWorktreeUse
+    ) -> bool:
         policy = str(self._config.get("goal.review_policy"))
         if policy == "never":
             return False
         if policy == "always":
             return True
-        changed = GitOps.changed_files(worktree, state.base_sha)
+        worktree = self._prove_candidate_for_use(candidate_worktree)
+        try:
+            with self._pinned_git_authority(candidate_worktree.handle) as _identity:
+                changed = GitOps.changed_files(worktree, state.base_sha)
+        finally:
+            self._prove_candidate_for_use(candidate_worktree)
         return len(changed) >= 2  # "substantial": multi-file change
 
     def _invoke_agent(
         self,
+        record: GoalRecord,
         state: RunState,
         decision: RoutingDecision,
         prompt: str,
         *,
         cwd: Path,
         write_access: bool,
+        candidate_worktree: _CandidateWorktreeUse | None = None,
     ) -> str:
         resource = decision.resource
         state.routing_log.append(decision.reason)
@@ -624,23 +1230,36 @@ class GoalRunner:
             f"/{resource.reasoning or '-'}) — {decision.reason}"
         )
         state.agent_calls += 1
-        self._save_state(state)
+        self._save_state(record, state)
         timeout = int(str(self._config.get("goal.agent_timeout_seconds")))
-        execution = self._runner.run(
-            AgentInvocation(
-                runtime=resource.runtime,
-                prompt=prompt,
-                cwd=cwd,
-                model=resource.model,
-                reasoning=resource.reasoning,
-                timeout_seconds=timeout,
-                write_access=write_access,
-                command_template=resource.command_template,
-                env_passthrough=resource.env_passthrough,
-                secret_env=resource.secret_env,
-                process_record_path=self.process_record_path(state.goal_name),
+        if candidate_worktree is not None:
+            proven_cwd = self._prove_candidate_for_use(candidate_worktree)
+            if cwd != proven_cwd:
+                raise StorageError(
+                    f"candidate agent cwd {cwd} does not match current managed "
+                    f"proof {proven_cwd}"
+                )
+            cwd = proven_cwd
+        try:
+            execution = self._runner.run(
+                AgentInvocation(
+                    runtime=resource.runtime,
+                    prompt=prompt,
+                    cwd=cwd,
+                    model=resource.model,
+                    reasoning=resource.reasoning,
+                    timeout_seconds=timeout,
+                    write_access=write_access,
+                    command_template=resource.command_template,
+                    env_passthrough=resource.env_passthrough,
+                    secret_env=resource.secret_env,
+                    process_record_path=self.process_record_path(state.goal_name),
+                    process_record_root=self._workspace.goals_dir,
+                )
             )
-        )
+        finally:
+            if candidate_worktree is not None:
+                self._prove_candidate_for_use(candidate_worktree)
         self._store.log_event(
             state.goal_name,
             {
@@ -663,6 +1282,21 @@ class GoalRunner:
         return execution.output_text
 
     def _loop(self, record: GoalRecord, state: RunState) -> GoalStatus:
+        candidate = self._open_candidate_worktree(record, state)
+        assert candidate is not None  # create_if_missing defaults to True
+        try:
+            return self._loop_with_candidate(record, state, candidate)
+        finally:
+            # Release the lease on every return/exception while preserving the
+            # owned checkout and commit anchor as durable owner evidence.
+            self._close_candidate_worktree()
+
+    def _loop_with_candidate(
+        self,
+        record: GoalRecord,
+        state: RunState,
+        candidate_worktree: _CandidateWorktreeUse,
+    ) -> GoalStatus:
         limits = record.contract.limits
         while True:
             # Owner cancellation is durable: honor it between stages.
@@ -702,12 +1336,10 @@ class GoalRunner:
                     f"{state.consecutive_failures} consecutive failed attempts",
                 )
 
-            worktree = self._ensure_worktree(record, state)
-
             # Evaluate: acceptance checks in the writer worktree are the
             # progress signal; ACHIEVED is decided only by the immutable
             # verification of the committed candidate below.
-            check_results = self._run_checks(record, worktree)
+            check_results = self._run_checks(record, candidate_worktree)
             previously_unmet = set(state.last_unmet)
             state.check_results = {
                 check_id: result.ok for check_id, result in check_results.items()
@@ -726,12 +1358,14 @@ class GoalRunner:
             self._progress(
                 f"progress   {met}/{len(record.contract.checks)} acceptance conditions"
             )
-            self._save_state(state)
+            self._save_state(record, state)
 
             verify_failures: list[CommandResult] = []
             blocking: list[dict[str, object]] = []
             if not unmet:
-                evaluation = self._evaluate_candidate(record, state, worktree)
+                evaluation = self._evaluate_candidate(
+                    record, state, candidate_worktree
+                )
                 if evaluation.finished is not None:
                     return evaluation.finished
                 if evaluation.skip_writer:
@@ -750,7 +1384,12 @@ class GoalRunner:
                 attempt=state.consecutive_failures + 1,
                 preferred_resource=preferred,
             )
-            head_before = GitOps.head_sha(worktree)
+            worktree = self._prove_candidate_for_use(candidate_worktree)
+            try:
+                with self._pinned_git_authority(candidate_worktree.handle) as _identity:
+                    head_before = GitOps.head_sha(worktree)
+            finally:
+                self._prove_candidate_for_use(candidate_worktree)
             prompt = build_implement_prompt(
                 record,
                 unmet=unmet,
@@ -764,11 +1403,17 @@ class GoalRunner:
             )
             try:
                 self._invoke_agent(
-                    state, decision, prompt, cwd=worktree, write_access=True
+                    record,
+                    state,
+                    decision,
+                    prompt,
+                    cwd=worktree,
+                    write_access=True,
+                    candidate_worktree=candidate_worktree,
                 )
             except SpecError as exc:
                 state.consecutive_failures += 1
-                self._save_state(state)
+                self._save_state(record, state)
                 self._store.log_event(
                     state.goal_name, {"event": "attempt.failed", "error": str(exc)}
                 )
@@ -786,16 +1431,14 @@ class GoalRunner:
                     "uncommitted work discarded",
                 )
 
-            committed = GitOps.commit_all(
-                worktree,
+            candidate, advanced = self._commit_candidate(
+                record,
+                state,
+                candidate_worktree,
                 f"goal({state.goal_name}): attempt {state.attempts} ({task_kind})",
             )
-            if committed is not None:
-                state.candidate_sha = committed
-                state.tested_sha = None
-                state.verification = None
-                state.verify_ok = None
-                self._progress(f"candidate  {committed[:12]}")
+            if advanced:
+                self._progress(f"candidate  {candidate[:12]}")
 
             # Progress accounting drives escalation: only objective progress
             # resets the ladder. A previously-unmet check newly passing counts;
@@ -803,14 +1446,12 @@ class GoalRunner:
             # stage). A commit alone — however large — never resets: an agent
             # producing irrelevant commits must still escalate.
             after_results = {
-                check.check_id: run_shell(
+                check.check_id: self._run_candidate_shell(
                     check.command,
-                    cwd=worktree,
-                    monotonic=self._monotonic,
+                    candidate_worktree,
                     timeout_seconds=int(
                         str(self._config.get("goal.agent_timeout_seconds"))
                     ),
-                    scrubber=self._scrubber,
                 ).ok
                 for check in record.contract.checks
                 if check.check_id in previously_unmet or not previously_unmet
@@ -822,33 +1463,41 @@ class GoalRunner:
                 state.consecutive_failures = 0
             elif state.last_unmet:
                 state.consecutive_failures += 1
-            elif committed is None and GitOps.head_sha(worktree) == head_before:
-                # Gate/review remediation that changed nothing: no progress.
-                state.consecutive_failures += 1
+            elif not advanced:
+                worktree = self._prove_candidate_for_use(candidate_worktree)
+                try:
+                    with self._pinned_git_authority(
+                        candidate_worktree.handle
+                    ) as _identity:
+                        head_unchanged = GitOps.head_sha(worktree) == head_before
+                finally:
+                    self._prove_candidate_for_use(candidate_worktree)
+                if head_unchanged:
+                    # Gate/review remediation that changed nothing: no progress.
+                    state.consecutive_failures += 1
             # else: gate/review remediation produced a new candidate — its
             # verdict comes from the next immutable verification, not from
             # the mere existence of a commit.
-            self._save_state(state)
+            self._save_state(record, state)
 
     # -- immutable candidate evaluation --------------------------------------
 
     def _evaluate_candidate(
-        self, record: GoalRecord, state: RunState, worktree: Path
+        self,
+        record: GoalRecord,
+        state: RunState,
+        candidate_worktree: _CandidateWorktreeUse,
     ) -> _CandidateEvaluation:
         # Freeze: commit any uncommitted writer work. The candidate SHA is
         # derived from Git every time — never trusted from stale run-state.
-        committed = GitOps.commit_all(
-            worktree, f"goal({state.goal_name}): candidate"
+        candidate, advanced = self._commit_candidate(
+            record,
+            state,
+            candidate_worktree,
+            f"goal({state.goal_name}): candidate",
         )
-        candidate = GitOps.head_sha(worktree)
-        if committed is not None:
+        if advanced:
             self._progress(f"candidate  {candidate[:12]} (frozen)")
-        if state.candidate_sha != candidate:
-            state.candidate_sha = candidate
-            state.tested_sha = None
-            state.verification = None
-            state.verify_ok = None
-            self._save_state(state)
 
         durable_blocking = blocking_findings(state, candidate)
         if durable_blocking:
@@ -863,15 +1512,15 @@ class GoalRunner:
             ok, failures = self._immutable_verification(record, state, candidate)
             if not ok:
                 state.verify_ok = False
-                self._save_state(state)
+                self._save_state(record, state)
                 return _CandidateEvaluation(verify_failures=failures)
             state.verify_ok = True
             state.tested_sha = candidate
             state.consecutive_failures = 0  # objective progress
-            self._save_state(state)
+            self._save_state(record, state)
 
         if (
-            self._review_required(state, worktree)
+            self._review_required(state, candidate_worktree)
             and state.review_passed_for != candidate
         ):
             kind, review_blocking, reason = self._review_candidate(
@@ -897,7 +1546,7 @@ class GoalRunner:
             if kind == "blocking":
                 return _CandidateEvaluation(blocking=review_blocking)
             state.review_passed_for = candidate
-            self._save_state(state)
+            self._save_state(record, state)
             return _CandidateEvaluation(
                 finished=self._finish(
                     record,
@@ -927,15 +1576,18 @@ class GoalRunner:
         scrubbed output and its hash) is persisted in run-state.
         """
         timeout = int(str(self._config.get("goal.agent_timeout_seconds")))
-        worktree = (
-            self._workspace.worktrees_dir
-            / f"{state.goal_name}-{state.run_id}-verify"
+        spec = WorktreeSpec(
+            goal_name=state.goal_name,
+            run_id=state.run_id,
+            purpose=WorktreePurpose.VERIFY,
+            sha=candidate,
         )
+        handle = self._create_immutable_worktree(spec)
+        worktree = handle.path
         self._progress(
             f"verify-wt  fresh disposable worktree @ {candidate[:12]} "
             "(immutable candidate)"
         )
-        GitOps.fresh_worktree(self._workspace.root, worktree, candidate)
         results: list[CommandResult] = []
         evidence: list[dict[str, object]] = []
         try:
@@ -944,13 +1596,19 @@ class GoalRunner:
                 for check in record.contract.checks
             ] + [("verify", command) for command in record.contract.verify_commands]
             for label, command in labelled:
-                result = run_shell(
-                    command,
-                    cwd=worktree,
-                    monotonic=self._monotonic,
-                    timeout_seconds=timeout,
-                    scrubber=self._scrubber,
-                )
+                with handle.pinned_authority() as (
+                    _worktree_fd,
+                    _common_fd,
+                    identity,
+                ):
+                    result = run_shell(
+                        command,
+                        cwd=worktree,
+                        cwd_identity=identity,
+                        monotonic=self._monotonic,
+                        timeout_seconds=timeout,
+                        scrubber=self._scrubber,
+                    )
                 results.append(result)
                 evidence.append(
                     {
@@ -968,13 +1626,14 @@ class GoalRunner:
                 )
                 status = "ok" if result.ok else f"FAIL (exit {result.exit_code})"
                 self._progress(f"verify     {label} @ {candidate[:12]}: {status}")
-            mutated = GitOps.tracked_dirty(worktree)
-            head_after = GitOps.head_sha(worktree)
+            with self._pinned_git_authority(handle) as _identity:
+                mutated = GitOps.tracked_dirty(worktree)
+                head_after = GitOps.head_sha(worktree)
         finally:
-            try:
-                GitOps.worktree_remove(self._workspace.root, worktree)
-            except SpecError:  # pragma: no cover — cleanup is best-effort
-                pass
+            # Cleanup authority is the still-live generation handle.  A
+            # failure is explicit and leaves the durable owner generation for
+            # managed recovery; it is never downgraded to best-effort success.
+            self._worktrees.remove(handle)
         ok = all(result.ok for result in results)
         if mutated:
             ok = False
@@ -1017,18 +1676,18 @@ class GoalRunner:
             "tracked_mutations": mutated[:50],
             "head_after": head_after,
         }
-        self._save_state(state)
+        self._save_state(record, state)
         return ok, [result for result in results if not result.ok]
 
     # -- exact-SHA independent review ----------------------------------------
 
     def _record_review_failure(
-        self, state: RunState, entry: dict[str, object], error: str
+        self, record: GoalRecord, state: RunState, entry: dict[str, object], error: str
     ) -> None:
         entry["error"] = error
         state.review_failures += 1
         state.reviews.append(entry)
-        self._save_state(state)
+        self._save_state(record, state)
         self._store.log_event(
             state.goal_name,
             {"event": "review.failed", "error": error},
@@ -1066,11 +1725,14 @@ class GoalRunner:
                 "the implementation writer; independent review requires a "
                 "distinct resource (configure goal.review_resource)",
             )
-        worktree = (
-            self._workspace.worktrees_dir
-            / f"{state.goal_name}-{state.run_id}-review"
+        spec = WorktreeSpec(
+            goal_name=state.goal_name,
+            run_id=state.run_id,
+            purpose=WorktreePurpose.REVIEW,
+            sha=candidate,
         )
-        GitOps.fresh_worktree(self._workspace.root, worktree, candidate)
+        handle = self._create_immutable_worktree(spec)
+        worktree = handle.path
         entry: dict[str, object] = {
             "ts": self._clock.now_iso(),
             "candidate_sha": candidate,
@@ -1080,18 +1742,22 @@ class GoalRunner:
             "findings": [],
         }
         try:
-            head_before = GitOps.head_sha(worktree)
+            with self._pinned_git_authority(handle) as _identity:
+                head_before = GitOps.head_sha(worktree)
             entry["head_before"] = head_before
             if head_before != candidate:
                 self._record_review_failure(
+                    record,
                     state,
                     entry,
                     f"review checkout HEAD {head_before} != candidate {candidate}",
                 )
                 return "infra", [], "review checkout integrity failure"
-            diff_sha = GitOps.diff_sha256(worktree, state.base_sha)
+            with self._pinned_git_authority(handle) as _identity:
+                diff_sha = GitOps.diff_sha256(worktree, state.base_sha)
             entry["diff_sha256"] = diff_sha
-            diff = self._scrubber.scrub(GitOps.diff_text(worktree, state.base_sha))
+            with self._pinned_git_authority(handle) as _identity:
+                diff = self._scrubber.scrub(GitOps.diff_text(worktree, state.base_sha))
             prompt = build_review_prompt(
                 record,
                 diff,
@@ -1104,18 +1770,20 @@ class GoalRunner:
             )
             try:
                 output = self._invoke_agent(
-                    state, decision, prompt, cwd=worktree, write_access=False
+                    record, state, decision, prompt, cwd=worktree, write_access=False
                 )
             except SpecError as exc:
                 self._record_review_failure(
-                    state, entry, f"review agent failed: {exc}"
+                    record, state, entry, f"review agent failed: {exc}"
                 )
                 return "infra", [], str(exc)
-            head_after = GitOps.head_sha(worktree)
+            with self._pinned_git_authority(handle) as _identity:
+                head_after = GitOps.head_sha(worktree)
             entry["head_after"] = head_after
             entry["head_verified"] = head_after == candidate
             if head_after != candidate:
                 self._record_review_failure(
+                    record,
                     state,
                     entry,
                     f"review checkout HEAD moved to {head_after} during review",
@@ -1129,7 +1797,7 @@ class GoalRunner:
                 findings = parse_review_findings(output)
             except SpecError as exc:
                 self._record_review_failure(
-                    state, entry, f"unparseable reviewer output: {exc}"
+                    record, state, entry, f"unparseable reviewer output: {exc}"
                 )
                 self._progress(
                     "review     reviewer output unparseable — infrastructure "
@@ -1140,7 +1808,7 @@ class GoalRunner:
             entry["findings"] = findings
             state.reviews.append(entry)
             state.review_findings = findings
-            self._save_state(state)
+            self._save_state(record, state)
             self._store.log_event(
                 state.goal_name,
                 {
@@ -1165,10 +1833,7 @@ class GoalRunner:
                 return "blocking", review_blocking, ""
             return "clean", [], ""
         finally:
-            try:
-                GitOps.worktree_remove(self._workspace.root, worktree)
-            except SpecError:  # pragma: no cover — cleanup is best-effort
-                pass
+            self._worktrees.remove(handle)
 
 
 def goal_show_doc(record: GoalRecord, state: RunState | None) -> dict[str, object]:

@@ -54,13 +54,13 @@ probes.
 
 ---
 
-## МИ ТУТ: R1 recovery, merge-authorized PROV-001 → R1-H closure
+## МИ ТУТ: R1-H DONE → next merge-authorized phase G2
 
-R1 відновлює неприйнятий Workspace Autonomous Developer після security і
-durability review. R1-A (SEC-001) прийнято й інтегровано разом із held
-endpoints R1-B1…R1-G0; закрито 10 з 11 findings. Merge-authorized напрям
-зараз — останній unresolved finding PROV-001 (durable contributor provenance,
-bound до commits), після якого R1-H оголошується повністю завершеним.
+R1 відновив неприйнятий Workspace Autonomous Developer після security і
+durability review. **R1-H завершено**: R1-A (SEC-001) + held endpoints
+R1-B1…R1-G0 + PROV-001 інтегровано на main; усі 11 findings закрито, 0
+unresolved BLOCKER/MAJOR. Наступний merge-authorized напрям — G2 (durable
+context and Goals). G2–G5 і повний RC1 (з Qt GUI) ще попереду.
 
 Цей напис показує поточну фазу плану, але не є status ledger. Який candidate
 активний, які verdict отримані та які held lanes вже reviewed, дивіться у

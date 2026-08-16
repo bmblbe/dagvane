@@ -18,13 +18,13 @@ roadmap — у [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md), системні п
 | Immutable documentation source baseline | `b846dfd3b9027e25a37d9be055c6764a2a4ed536`; це source commit цього docs rewrite, не твердження про те, куди зараз вказує `main`. |
 | Прийнятий фундамент | G0 (deterministic Council) і G1 (live multi-provider Council) прийняті у своєму scope. |
 | Неприйнята поверхня | Workspace Autonomous Developer небезпечний і не має product acceptance. |
-| Integrated R1 recovery | R1-A accepted `079c037975f208973001cbf13cb943c3ebdd0e60` + held endpoints інтегровано у combined commit `c60bb4d5bb04cc5570978436897b8720022b2b4c` (prior `1bb789c686b8ae3cb7e116188c0f6d20fd04f65e` — його предок; main advanced ff-only, без history rewrite). Це стабільні commit-факти, не volatile pointer; поточний main читайте з Git. |
+| Integrated R1 recovery | R1-A accepted `079c037975f208973001cbf13cb943c3ebdd0e60` + held endpoints інтегровано у combined commit `c60bb4d5bb04cc5570978436897b8720022b2b4c`, потім PROV-001 accepted `6e8081dc1bdce5761f5ec38ed1f78dc9ebd8064c` (prior `1bb789c686b8ae3cb7e116188c0f6d20fd04f65e` — предок усіх; main advanced ff-only, без history rewrite). **R1-H DONE**: усі 11 R1 findings закрито. Це стабільні commit-факти, не volatile pointer; поточний main читайте з Git. |
 | R1-A / SEC-001 | `DONE`, accepted at `079c037975f208973001cbf13cb943c3ebdd0e60`, інтегровано. Canonical `dagvane.domain.identifiers` + fail-closed shell/commit/path/leaf/worktree containment. Base `7c9d982caed501605caa72e474651ba907b2bf18`; earlier `c6fa49f/1478ef2/dec9793` superseded (recovery refs). |
 | Integrated held modules | R1-B1 `11501886…`, R1-C0 `a5878da…`, R1-D0 `b2e0ff9…`, R1-E0 `fb7331e…`, R1-F0 `3df316b…`, R1-G0 `f4aac9a…` — інтегровано в dependency order на combined SHA; кожен файл byte-identical джерелу; focused lane contracts re-proven green. Isolated recovery refs збережено. |
 | Combined evidence | На `c60bb4d5bb04cc5570978436897b8720022b2b4c`: full `uv run pytest` 1654 passed, 1 skipped; Ruff clean; mypy clean (103 files); `git diff --check` clean; independent combined-SHA review `ACCEPT` 0 BLOCKER / 0 MAJOR (integrity, held-lane contracts, cross-module import graph, secrets, provenance). |
 | User-safe Command-Line Interface (CLI) | Тільки `dagvane plan council`, `dagvane council`, `dagvane runs show`, `dagvane events`. |
-| Stop gate | R1-H ще не закритий повністю (PROV-001 open); до повного integrated R1-H жодна workspace-команда не використовується на реальному або цінному repository. |
-| Далі | Закрити останній R1 finding PROV-001 (contributor provenance) як bounded lane, оголосити R1-H повністю завершеним (zero unresolved BLOCKER/MAJOR), лише тоді починати G2. |
+| Stop gate | R1-H закрито (0 unresolved BLOCKER/MAJOR). Наступні фази G2–G5 ще не пройдені, тож повний Workspace product acceptance попереду; workspace-команди на реальному repository все ще потребують obережності до відповідних milestone-gates. |
+| Далі | Почати G2 (durable context and Goals) за [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md): Dagvane-owned conversation history, fresh/resume/reconstruct контракти, ContextSnapshot, crash-durable Goal state. |
 | Після продукту | Release Candidate 1 (RC1) включає Qt GUI; MilHRMS починається тільки після explicit owner acceptance RC1. |
 
 `R1-Xn` означає bounded lane усередині recovery R1: літера задає outcome,
@@ -76,10 +76,10 @@ Severity і priority — різні речі:
 | R1-C0 / managed-process V1 | `INTEGRATED` (source `a5878da…`) | — | Process port contract/process-tree tests green на combined SHA. |
 | R1-D0 / monotonic cancellation V1 | `INTEGRATED` (source `b2e0ff9…`) | — | Cancellation/monotonic/quiescence contracts green на combined SHA. |
 | R1-E0 / exact-SHA evidence V1 | `INTEGRATED` (source `fb7331e…`) | — | Fresh immutable exact-SHA evidence views green на combined SHA. |
-| R1-F0 / strict review-document V1 | `INTEGRATED` (source `3df316b…`) | Закриває REV-001; НЕ закриває PROV-001 (contributor provenance лишається open). | Strict review-document parser/reviewer green на combined SHA. |
+| R1-F0 / strict review-document V1 | `INTEGRATED` (source `3df316b…`) | Закриває REV-001. | Strict review-document parser/reviewer green на combined SHA. |
 | R1-G0 / no-progress escalation V1 | `INTEGRATED` (source `f4aac9a…`) | — | Escalation contracts green на combined SHA. |
-| R1-H / integrated recovery | `PARTIAL` — combined candidate `c60bb4d…` збудовано, full gates + independent review 0 BLOCKER/MAJOR | Закрити PROV-001, тоді оголосити R1-H `DONE`. | Один clean integration SHA (є: `c60bb4d…`) + consolidated suite + full gates + independent review — виконано для інтегрованих parts; повне закриття чекає PROV-001. |
-| PROV-001 / contributor provenance | `OPEN` — не покрито жодним accepted endpoint | Bounded lane: durable contributor identity до effect, bound до candidate commits; exact-SHA review. | Deterministic provenance regressions + full gates + independent review 0 BLOCKER/MAJOR. |
+| PROV-001 / contributor provenance | `DONE`, accepted `6e8081dc1bdce5761f5ec38ed1f78dc9ebd8064c` | — | Durable-before-effect contributor set + whole-set reviewer exclusion; independent review 0 BLOCKER/MAJOR (26 probes); cloud critic findings refuted; full gates 1670 passed/1 skipped. |
+| R1-H / integrated recovery | `DONE` — R1-A + R1-B1…G0 (`c60bb4d…`) + PROV-001 (`6e8081d…`) on main; усі 11 findings closed | — | Clean integration SHAs + consolidated suite + full gates + independent review 0 BLOCKER/MAJOR; 0 unresolved. |
 
 ## R1-A / SEC-001 acceptance contract
 
@@ -131,7 +131,7 @@ Candidate має бути committed і clean. Review називає exact SHA. �
 unresolved BLOCKER/MAJOR створює новий remediation SHA й повний повтор gate та
 review; старий verdict не переписується.
 
-## Finding ledger: 4 BLOCKER + 7 MAJOR (10 closed on `c60bb4d`, PROV-001 open)
+## Finding ledger: 4 BLOCKER + 7 MAJOR (all 11 CLOSED; R1-H DONE)
 
 Prefix пояснює область finding: Security (`SEC`), Resource (`RES`), Runtime
 process (`RUN`), Evidence (`EVD`), Review (`REV`), Provenance (`PROV`) і
@@ -148,7 +148,7 @@ Routing/escalation (`RTE`).
 | Evidence 001 (`EVD-001`) | BLOCKER | R1-E | Acceptance commands не можуть author/forge candidate bytes. | `CLOSED` on combined `c60bb4d…` (R1-E0 integrated). |
 | Evidence 002 (`EVD-002`) | MAJOR | R1-E | Кожна evidence command бачить fresh exact-SHA view. | `CLOSED` on combined `c60bb4d…` (R1-E0 integrated). |
 | Review 001 (`REV-001`) | MAJOR | R1-F | Malformed/unknown review ніколи не стає PASS. | `CLOSED` on combined `c60bb4d…` (R1-F0 integrated). |
-| Provenance 001 (`PROV-001`) | MAJOR | R1-F | Contributor identity durable до effect і bound до commits. | `OPEN`; R1-F0 сам не закриває outcome. Останній unresolved R1 finding; blocks full R1-H/G2. |
+| Provenance 001 (`PROV-001`) | MAJOR | R1-F | Contributor identity durable до effect і bound до commits. | `CLOSED` at `6e8081d…`, on main. Durable-before-effect contributor set + whole-set reviewer exclusion; independent review 0/0. |
 | Routing 001 (`RTE-001`) | MAJOR | R1-G | Progress визначається новим evidence, не лише новим SHA. | `CLOSED` on combined `c60bb4d…` (R1-G0 integrated). |
 
 ## Documentation і owner decisions

@@ -41,7 +41,8 @@ integration SHA: він стає частиною product line лише післ
 - `REVISE`, passing tests або isolated V1 acceptance не дорівнюють product
   acceptance.
 - Не інтегруйте `PARALLEL-HELD` module до acceptance його dependency.
-- Не починайте G2 до integrated R1-H із zero unresolved BLOCKER/MAJOR.
+- Не починайте G2 до integrated R1-H із zero unresolved BLOCKER/MAJOR
+  (умову виконано: R1-H DONE, усі 11 findings закрито — G2 розблоковано).
 - Не починайте MilHRMS до owner acceptance повного RC1.
 
 ## Що означають statuses
